@@ -297,20 +297,40 @@ pub async fn handle_logs(name: Option<String>, follow: bool, lines_count: usize,
         println!("{}", "--- Transmitiendo logs en tiempo real (Ctrl+C para salir) ---".dimmed());
         let mut file = tokio::fs::File::open(&log_path).await?;
         let _ = file.seek(std::io::SeekFrom::End(0)).await;
-        let mut stream_reader = BufReader::new(file).lines();
+        let mut reader = BufReader::new(file);
+        let mut line_buf = String::new();
 
         loop {
             tokio::select! {
-                line_res = stream_reader.next_line() => {
-                    match line_res {
-                        Ok(Some(line)) => print_colored_log(&line),
-                        Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+                biased;
+
+                _ = tokio::signal::ctrl_c() => {
+                    println!("\n{}", "Deteniendo visualización de logs.".yellow());
+                    break;
+                }
+
+                res = reader.read_line(&mut line_buf) => {
+                    match res {
+                        Ok(0) => {
+                            // Fin de archivo momentáneo: esperar mientras se sigue escuchando Ctrl+C
+                            tokio::select! {
+                                biased;
+                                _ = tokio::signal::ctrl_c() => {
+                                    println!("\n{}", "Deteniendo visualización de logs.".yellow());
+                                    return Ok(());
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
+                            }
+                        }
+                        Ok(_) => {
+                            let trimmed = line_buf.trim_end();
+                            if !trimmed.is_empty() {
+                                print_colored_log(trimmed);
+                            }
+                            line_buf.clear();
+                        }
                         Err(_) => break,
                     }
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    println!("\nDeteniendo visualización de logs.");
-                    break;
                 }
             }
         }
