@@ -1,0 +1,42 @@
+[package]
+name = "mcserman"
+version = "0.1.0"
+edition = "2021"
+authors = ["AdrianChaSan <https://github.com/AdrianChaSan>"]
+description = "A powerful, host-independent Minecraft Dedicated Server Manager written in Rust"
+
+[dependencies]
+# CLI y prompts interactivos
+clap = { version = "4", features = ["derive", "env"] }
+inquire = "0.7"
+
+# Asincronía y peticiones HTTP
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+urlencoding = "2.1"
+
+# UI en terminal y barras de progreso
+indicatif = { version = "0.17", features = ["tokio"] }
+colored = "3.0"
+console = "0.15"
+
+# Serialización y configuración
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Rutas estándar del sistema y manejo de errores
+directories = "5.0"
+which = "7.0"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Criptografía e integridad de archivos
+sha2 = "0.10"
+hex = "0.4"
+
+# Descompresión para Java / Loaders
+flate2 = "1.0"
+tar = "0.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
