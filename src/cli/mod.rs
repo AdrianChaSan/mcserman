@@ -70,7 +70,7 @@ pub async fn handle_create(
 
     // 2. Modloader y versión
     let final_loader = prompts::prompt_loader(loader)?;
-    let final_mc_ver = prompts::prompt_mc_version(mc_version)?;
+    let final_mc_ver = prompts::prompt_mc_version(mc_version, &final_loader).await?;
     let final_ram = prompts::prompt_string(ram, "Memoria RAM asignada (ej. 2G, 4G, 8G):", "4G")?;
     let final_port = port.unwrap_or(25565);
 

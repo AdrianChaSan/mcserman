@@ -65,7 +65,7 @@ pub fn prompt_loader(loader: Option<String>) -> Result<LoaderType> {
     }
 }
 
-pub fn prompt_mc_version(version: Option<String>) -> Result<String> {
+pub async fn prompt_mc_version(version: Option<String>, loader: &LoaderType) -> Result<String> {
     if let Some(v) = version {
         return Ok(v);
     }
@@ -73,22 +73,30 @@ pub fn prompt_mc_version(version: Option<String>) -> Result<String> {
         return Ok("1.21.4".to_string());
     }
 
-    let common_versions = vec![
-        "1.21.4 (Última versión estable actual)",
-        "1.21.1",
-        "1.20.4",
-        "1.20.1",
-        "1.16.5",
-        "Otra versión personalizada...",
-    ];
+    print!("🔍 Consultando versiones disponibles para {}...", loader);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let fetched = match crate::loaders::fetch_available_versions(loader).await {
+        Ok(vers) if !vers.is_empty() => vers,
+        _ => {
+            vec!["1.21.4".to_string(), "1.21.1".to_string(), "1.20.4".to_string(), "1.20.1".to_string(), "1.16.5".to_string()]
+        }
+    };
+    print!("\r\x1b[2K");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let mut options = fetched;
+    options.push("Otra versión personalizada...".to_string());
 
     let choice = handle_inquire_cancel(
-        Select::new("Selecciona la versión de Minecraft:", common_versions).prompt()
+        Select::new("Selecciona la versión de Minecraft (puedes escribir para filtrar):", options)
+            .with_page_size(15)
+            .prompt()
     )?;
 
     if choice.starts_with("Otra") {
         let custom = handle_inquire_cancel(
-            Text::new("Ingresa la versión exacta de Minecraft (ej. 1.21):").prompt()
+            Text::new("Ingresa la versión exacta de Minecraft (ej. 1.21.4):").prompt()
         )?;
         Ok(custom.trim().to_string())
     } else {
