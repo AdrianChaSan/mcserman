@@ -71,13 +71,24 @@ pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
         }
     }
 
-    // 2. Verificar si ya tenemos el runtime descargado en runtimes_dir
-    let local_runtime_dir = paths.runtimes_dir.join(format!("java-{}", version));
-    if let Some(java_bin) = find_java_binary(&local_runtime_dir) {
-        return Ok(java_bin);
+    // 1.1 Si estamos en NixOS y la variable no está en el entorno del proceso actual,
+    // consultar /etc/set-environment (donde NixOS guarda sessionVariables del sistema)
+    if Path::new("/etc/set-environment").exists() {
+        if let Ok(content) = std::fs::read_to_string("/etc/set-environment") {
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix(&format!("export {}=", env_var_name)) {
+                    let path_str = rest.trim_matches('"').trim_matches('\'');
+                    let p = PathBuf::from(path_str);
+                    let java_bin = if p.is_dir() { p.join("bin").join("java") } else { p };
+                    if java_bin.exists() {
+                        return Ok(java_bin);
+                    }
+                }
+            }
+        }
     }
 
-    // 3. Verificar si el comando `java` en el PATH del sistema coincide con la versión
+    // 2. Verificar si el comando `java` en el PATH del sistema coincide con la versión
     let java_candidates = [which::which("java").ok(), Some(PathBuf::from("java"))];
     for candidate in java_candidates.into_iter().flatten() {
         if let Ok(detected_ver) = query_java_version(&candidate) {
@@ -87,7 +98,25 @@ pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
         }
     }
 
-    // 4. Auto-descarga desde Adoptium API (Eclipse Temurin)
+    // 3. Verificar si ya tenemos el runtime descargado en runtimes_dir (solo si es ejecutable)
+    let local_runtime_dir = paths.runtimes_dir.join(format!("java-{}", version));
+    if let Some(java_bin) = find_java_binary(&local_runtime_dir) {
+        if query_java_version(&java_bin).is_ok() {
+            return Ok(java_bin);
+        }
+    }
+
+    // 4. Si estamos en NixOS y no encontramos Java en Nix, NO intentar descargar binarios ELF genéricos
+    if Path::new("/etc/NIXOS").exists() {
+        bail!(
+            "Java {} no está disponible en NixOS.\n\
+             Configura 'services.mcserman.javaVersions = [ {} ];' en tu configuración de NixOS y ejecuta 'sudo nixos-rebuild switch'.\n\
+             (Si acabas de aplicar la configuración, ejecuta 'source /etc/set-environment' o abre una nueva terminal).",
+            version, version
+        );
+    }
+
+    // 5. Auto-descarga desde Adoptium API (Eclipse Temurin) para distribuciones estándar (Ubuntu, Debian, Fedora, Arch)
     println!("{}", format!("☕ Java {} no encontrado. Descargando automáticamente Eclipse Temurin...", version).cyan().bold());
     let downloaded_bin = download_adoptium_java(version, &local_runtime_dir).await?;
     Ok(downloaded_bin)
@@ -238,5 +267,14 @@ mod tests {
         let flags = aikar_g1gc_flags();
         assert!(flags.contains(&"-XX:+UseG1GC".to_string()));
         assert!(flags.contains(&"-XX:+AlwaysPreTouch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_java_21() {
+        let paths = SystemPaths::resolve();
+        let java_path = resolve_java(21, &paths).await;
+        assert!(java_path.is_ok(), "Failed to resolve Java 21: {:?}", java_path.err());
+        let bin = java_path.unwrap();
+        assert!(bin.exists());
     }
 }
