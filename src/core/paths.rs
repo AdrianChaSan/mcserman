@@ -62,11 +62,24 @@ impl SystemPaths {
         }
     }
 
-    pub fn ensure_dirs(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.base_dir)?;
-        std::fs::create_dir_all(&self.instances_dir)?;
-        std::fs::create_dir_all(&self.runtimes_dir)?;
-        std::fs::create_dir_all(&self.socket_dir)?;
+    pub fn ensure_dirs(&self) -> anyhow::Result<()> {
+        let check = |p: &Path| -> anyhow::Result<()> {
+            std::fs::create_dir_all(p).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    anyhow::anyhow!(
+                        "Permiso denegado al acceder al directorio '{}'.\n\
+                         💡 Si acabas de habilitar el módulo en NixOS, ejecuta 'newgrp mcserver' o abre una nueva terminal para refrescar tus permisos de grupo.",
+                        p.display()
+                    )
+                } else {
+                    anyhow::anyhow!("Error al preparar el directorio '{}': {}", p.display(), e)
+                }
+            })
+        };
+        check(&self.base_dir)?;
+        check(&self.instances_dir)?;
+        check(&self.runtimes_dir)?;
+        check(&self.socket_dir)?;
         Ok(())
     }
 

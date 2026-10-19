@@ -75,7 +75,18 @@ pub async fn handle_create(
     let final_port = port.unwrap_or(25565);
 
     // 3. Crear estructura de carpetas
-    std::fs::create_dir_all(&instance_dir)?;
+    std::fs::create_dir_all(&instance_dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "Permiso denegado al crear '{}'.\n\
+                 💡 Si acabas de habilitar el módulo de NixOS, los permisos de grupo aún no se han refrescado en tu terminal actual.\n\
+                 👉 Ejecuta 'newgrp mcserver' en tu terminal (o abre una nueva terminal) y vuelve a intentarlo.",
+                instance_dir.display()
+            )
+        } else {
+            anyhow::anyhow!("Error al crear el directorio '{}': {}", instance_dir.display(), e)
+        }
+    })?;
     let mut config = InstanceConfig::new(final_name.clone(), final_loader, final_mc_ver.clone());
     config.ram_max = final_ram.clone();
     config.port = final_port;
