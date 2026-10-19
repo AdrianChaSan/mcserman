@@ -28,28 +28,28 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
         .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
         .build()?;
 
-    match loader {
+    let mut versions = match loader {
         LoaderType::Paper => {
             let res = client.get("https://fill.papermc.io/v3/projects/paper").send().await?;
             if !res.status().is_success() {
                 anyhow::bail!("Error al consultar versiones de PaperMC: HTTP {}", res.status());
             }
             let data: serde_json::Value = res.json().await?;
-            let mut versions = Vec::new();
+            let mut list = Vec::new();
             if let Some(versions_map) = data.get("versions").and_then(|v| v.as_object()) {
-                for (_major, list) in versions_map {
-                    if let Some(arr) = list.as_array() {
+                for (_major, val) in versions_map {
+                    if let Some(arr) = val.as_array() {
                         for v in arr {
                             if let Some(s) = v.as_str() {
                                 if !s.contains("-pre") && !s.contains("-rc") {
-                                    versions.push(s.to_string());
+                                    list.push(s.to_string());
                                 }
                             }
                         }
                     }
                 }
             }
-            Ok(versions)
+            list
         }
         LoaderType::Fabric => {
             let res = client.get("https://meta.fabricmc.net/v2/versions/game").send().await?;
@@ -57,17 +57,17 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
                 anyhow::bail!("Error al consultar versiones de Fabric: HTTP {}", res.status());
             }
             let data: serde_json::Value = res.json().await?;
-            let mut versions = Vec::new();
+            let mut list = Vec::new();
             if let Some(arr) = data.as_array() {
                 for item in arr {
                     if item.get("stable").and_then(|b| b.as_bool()).unwrap_or(false) {
                         if let Some(v) = item.get("version").and_then(|s| s.as_str()) {
-                            versions.push(v.to_string());
+                            list.push(v.to_string());
                         }
                     }
                 }
             }
-            Ok(versions)
+            list
         }
         LoaderType::Vanilla => {
             let res = client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json").send().await?;
@@ -75,19 +75,39 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
                 anyhow::bail!("Error al consultar versiones de Mojang: HTTP {}", res.status());
             }
             let data: serde_json::Value = res.json().await?;
-            let mut versions = Vec::new();
+            let mut list = Vec::new();
             if let Some(arr) = data.get("versions").and_then(|v| v.as_array()) {
                 for item in arr {
                     if item.get("type").and_then(|t| t.as_str()) == Some("release") {
                         if let Some(v) = item.get("id").and_then(|s| s.as_str()) {
-                            versions.push(v.to_string());
+                            list.push(v.to_string());
                         }
                     }
                 }
             }
-            Ok(versions)
+            list
         }
-    }
+    };
+
+    sort_minecraft_versions(&mut versions);
+    Ok(versions)
+}
+
+fn sort_minecraft_versions(versions: &mut Vec<String>) {
+    versions.sort_by(|a, b| {
+        let ka = parse_version_key(a);
+        let kb = parse_version_key(b);
+        kb.cmp(&ka) // Descendente: la versión más reciente primero
+    });
+    versions.dedup();
+}
+
+fn parse_version_key(v: &str) -> Vec<u32> {
+    let num_part = v.split('-').next().unwrap_or(v);
+    num_part
+        .split('.')
+        .filter_map(|p| p.parse::<u32>().ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -113,5 +133,28 @@ mod tests {
         let versions = fetch_available_versions(&LoaderType::Vanilla).await.unwrap();
         assert!(!versions.is_empty());
         assert!(versions.iter().any(|v| v == "1.21.4" || v == "1.16.5"));
+    }
+
+    #[test]
+    fn test_minecraft_version_sorting() {
+        let mut sample = vec![
+            "1.7.10".to_string(),
+            "1.21.4".to_string(),
+            "26.3".to_string(),
+            "1.8.8".to_string(),
+            "1.20.4".to_string(),
+            "1.9.4".to_string(),
+            "26.1.2".to_string(),
+        ];
+        sort_minecraft_versions(&mut sample);
+        assert_eq!(sample, vec![
+            "26.3",
+            "26.1.2",
+            "1.21.4",
+            "1.20.4",
+            "1.9.4",
+            "1.8.8",
+            "1.7.10",
+        ]);
     }
 }
