@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
@@ -10,14 +11,30 @@ struct PaperVersionInfo {
     builds: Vec<u32>,
 }
 
+#[derive(Deserialize)]
+struct PaperBuildDownload {
+    name: String,
+    url: String,
+    #[allow(dead_code)]
+    size: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PaperBuildInfo {
+    downloads: HashMap<String, PaperBuildDownload>,
+}
+
 pub async fn download_paper(mc_version: &str, target_path: &Path) -> Result<String> {
     println!("{}", format!("📦 Resolviendo PaperMC para Minecraft {}...", mc_version).cyan());
 
-    let client = reqwest::Client::new();
-    let api_url = format!("https://api.papermc.io/v2/projects/paper/versions/{}", mc_version);
+    let client = reqwest::Client::builder()
+        .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+        .build()?;
 
-    let res = client.get(&api_url).send().await
-        .with_context(|| format!("Error al conectar con PaperMC API en {}", api_url))?;
+    let version_url = format!("https://fill.papermc.io/v3/projects/paper/versions/{}", mc_version);
+
+    let res = client.get(&version_url).send().await
+        .with_context(|| format!("Error al conectar con PaperMC API en {}", version_url))?;
 
     if !res.status().is_success() {
         bail!("La versión '{}' no está soportada o no existe en PaperMC (HTTP {})", mc_version, res.status());
@@ -27,13 +44,25 @@ pub async fn download_paper(mc_version: &str, target_path: &Path) -> Result<Stri
     let latest_build = info.builds.iter().max()
         .with_context(|| format!("No se encontraron builds disponibles para Paper {}", mc_version))?;
 
-    let jar_name = format!("paper-{}-{}.jar", mc_version, latest_build);
-    let download_url = format!(
-        "https://api.papermc.io/v2/projects/paper/versions/{}/builds/{}/downloads/{}",
-        mc_version, latest_build, jar_name
+    let build_url = format!(
+        "https://fill.papermc.io/v3/projects/paper/versions/{}/builds/{}",
+        mc_version, latest_build
     );
 
-    let response = client.get(&download_url).send().await?;
+    let build_res = client.get(&build_url).send().await
+        .with_context(|| format!("Error al consultar build #{} en PaperMC API", latest_build))?;
+
+    if !build_res.status().is_success() {
+        bail!("No se pudo obtener información del build #{} de PaperMC (HTTP {})", latest_build, build_res.status());
+    }
+
+    let build_info: PaperBuildInfo = build_res.json().await?;
+    let download = build_info.downloads.get("server:default")
+        .or_else(|| build_info.downloads.values().find(|d| d.name.ends_with(".jar")))
+        .with_context(|| format!("No se encontró archivo de descarga para Paper build #{}", latest_build))?;
+
+    let response = client.get(&download.url).send().await
+        .with_context(|| format!("Error al descargar jar de Paper desde {}", download.url))?;
     let total_size = response.content_length().unwrap_or(0);
 
     let pb = ProgressBar::new(total_size);
@@ -60,4 +89,22 @@ pub async fn download_paper(mc_version: &str, target_path: &Path) -> Result<Stri
     pb.finish_with_message("Descarga de PaperMC completada");
     println!("{}", format!("✓ Paper {} (build #{}) guardado en {}", mc_version, latest_build, target_path.display()).green());
     Ok(latest_build.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_papermc_v3_api_resolves() {
+        let client = reqwest::Client::builder()
+            .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+            .build()
+            .unwrap();
+        let version_url = "https://fill.papermc.io/v3/projects/paper/versions/1.21.4";
+        let res = client.get(version_url).send().await.unwrap();
+        assert!(res.status().is_success());
+        let info: PaperVersionInfo = res.json().await.unwrap();
+        assert!(!info.builds.is_empty());
+    }
 }
