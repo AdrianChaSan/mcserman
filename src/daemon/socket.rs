@@ -1,6 +1,6 @@
-use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -19,8 +19,12 @@ pub enum SocketResponse {
 }
 
 pub async fn send_request(socket_path: &Path, req: &SocketRequest) -> Result<SocketResponse> {
-    let mut stream = UnixStream::connect(socket_path).await
-        .with_context(|| format!("No se pudo conectar al socket en {}. ¿Está el servidor encendido?", socket_path.display()))?;
+    let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "No se pudo conectar al socket en {}. ¿Está el servidor encendido?",
+            socket_path.display()
+        )
+    })?;
 
     let json = serde_json::to_string(req)? + "\n";
     stream.write_all(json.as_bytes()).await?;

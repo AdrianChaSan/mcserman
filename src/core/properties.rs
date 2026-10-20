@@ -1,6 +1,6 @@
+use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::Path;
-use anyhow::Context;
 
 pub struct ServerProperties {
     properties: BTreeMap<String, String>,
@@ -39,8 +39,12 @@ impl ServerProperties {
         for (k, v) in &self.properties {
             out.push_str(&format!("{}={}\n", k, v));
         }
-        std::fs::write(path, out)
-            .with_context(|| format!("No se pudo escribir server.properties en {}", path.display()))?;
+        std::fs::write(path, out).with_context(|| {
+            format!(
+                "No se pudo escribir server.properties en {}",
+                path.display()
+            )
+        })?;
         Ok(())
     }
 }
@@ -51,7 +55,8 @@ mod tests {
 
     #[test]
     fn test_server_properties_crud() {
-        let mut props = ServerProperties::load_or_default(Path::new("/nonexistent/server.properties"));
+        let mut props =
+            ServerProperties::load_or_default(Path::new("/nonexistent/server.properties"));
         props.set("server-port", "25565");
         props.set("motd", "Servidor Test");
 

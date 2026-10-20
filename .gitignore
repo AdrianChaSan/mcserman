@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.sock
 .DS_Store
+result
+result-*

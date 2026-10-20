@@ -25,10 +25,38 @@
         mcserman = self.nixosModules.default;
       };
 
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [
+              rustc
+              cargo
+              clippy
+              rustfmt
+              pkg-config
+            ];
+            buildInputs = with pkgs; [
+              temurin-bin-21
+              temurin-bin-17
+              temurin-bin-8
+            ];
+            shellHook = ''
+              export MCSERVER_JAVA_21_PATH="${pkgs.temurin-bin-21}/bin/java"
+              export MCSERVER_JAVA_17_PATH="${pkgs.temurin-bin-17}/bin/java"
+              export MCSERVER_JAVA_8_PATH="${pkgs.temurin-bin-8}/bin/java"
+              export JAVA_HOME="${pkgs.temurin-bin-21}"
+            '';
+          };
+        });
+
       apps = forAllSystems (system: {
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/mcserman";
+          meta.description = "A powerful, host-independent Minecraft Dedicated Server Manager in Rust";
         };
       });
     };

@@ -1,28 +1,74 @@
 # ⛏️ mcserman (mc-server-manager)
 
-> **A high-performance, host-independent Minecraft Dedicated Server Manager written in Rust.**
+> **A high-performance, host-independent Minecraft Dedicated Server Manager in Rust with full Ratatui TUI and headless CLI.**
 
-`mcserman` allows you to create, manage, configure, and supervise multi-instance Minecraft servers with zero external bloat. It provides interactive terminal wizards, native Unix domain socket supervision, progressive disclosure, automatic Java runtime resolution, Modrinth API integration, and full NixOS compatibility.
+`mcserman` allows you to create, manage, configure, and supervise multi-instance Minecraft servers with zero external bloat. It features an interactive **Ratatui TUI dashboard**, native Unix domain socket supervision, multi-JDK management, Modrinth API integration, and first-class **NixOS** flake support.
 
 ---
 
 ## ✨ Key Features
 
-- 🦀 **Pure Rust & Static Binary:** Zero external script dependencies (no `tmux`, Python, or Node.js required).
-- 🧭 **Progressive Disclosure:** Fully interactive prompts with fuzzy search when running in an interactive terminal, or 100% headless execution via command-line flags for scripts and `systemd`.
-- 🔌 **Native Process Supervisor:** Launches Java as a child process and provides bi-directional control over a Unix Domain Socket with graceful shutdown (`SIGTERM` $\to$ `"stop\n"`).
-- ☕ **Smart Java Resolver:** Automatic hierarchy resolution: Nix Store environment variables $\to$ System `$PATH` $\to$ Auto-download from Eclipse Temurin (Adoptium API) for any Linux distro.
-- 📦 **Multi-Loader Support:** Automated provisioning for Mojang Vanilla, PaperMC (automatic latest build detection), and Fabric Loader.
-- 🧩 **Modrinth Integration:** Search and download mods/plugins with concurrent streams and cryptographic SHA-512 verification.
-- ❄️ **NixOS Native Flake:** Exports a reusable `packages.default` and a `nixosModules.default` with template unit `mcserver@<instance>.service`.
+- 🖥️ **Full Interactive TUI (Ratatui & Crossterm):** Modern terminal dashboard with sidebar instance selection, real-time metrics, live log streaming with auto-scroll, in-TUI Modrinth mod/plugin browser, server.properties editor, and modal creation wizards.
+- ⚡ **Dual CLI & TUI Architecture:** Running `mcserman` in an interactive terminal launches the TUI; running subcommands (`start`, `stop`, `daemon`, etc.) operates headlessly with zero UI overhead for scripts, CI/CD, and `systemd`.
+- 🔌 **Hardened Daemon Supervision (`setsid`):** JVM runs in a detached session (`setsid`) with `Stdio::null()`, preventing terminal hangup signals (`SIGHUP`) from killing servers and leveraging an asynchronous process reaper to eliminate zombie (`<defunct>`) processes.
+- ☕ **Smart Multi-JDK Resolution:** Out-of-the-box support for Java 21, 17, and 8. Automatically detects Nix Store paths (`MCSERVER_JAVA_*_PATH`), system `$PATH`, or falls back to downloading Eclipse Temurin JDKs.
+- 📦 **Multi-Loader Support:** Automated provisioning for Mojang Vanilla, PaperMC (automatic latest build detection via v3 API), and Fabric Loader.
+- 🧩 **Modrinth Integration:** Search and download compatible mods and plugins directly with throttled progress reporting and cryptographic SHA-512 verification.
+- ❄️ **Hermetic NixOS Support:** Flake exports `packages.default` (wrapped with Temurin 21/17/8), `devShells.default` for rapid development, and `nixosModules.default` with systemd template unit `mcserver@<instance>.service`.
 
 ---
 
-## 📥 Installation
+## 🎮 TUI Controls & Keyboard Shortcuts
 
-### Method 1: On NixOS (Declarative via Flakes)
+When launched without arguments (`mcserman`), the interactive TUI activates:
 
-Add `mcserman` to your `flake.nix` inputs:
+### Modo Navegación (`InputMode::Normal`)
+
+| Tecla / Atajo | Acción |
+|---|---|
+| `j` / `Down` | Seleccionar siguiente servidor en la barra lateral |
+| `k` / `Up` | Seleccionar servidor anterior en la barra lateral |
+| `Tab` / `Shift+Tab` | Cambiar entre pestañas cíclicamente |
+| `1` - `4` | Acceso directo a pestaña (`1`: Dashboard, `2`: Consola, `3`: Modrinth, `4`: Configuración) |
+| `Space` | Iniciar / Detener servidor seleccionado (o alternar valores booleanos en Configuración) |
+| `n` | Abrir asistente modal de creación de nueva instancia |
+| `r` | Recargar lista de servidores y refrescar estado de sockets |
+| `PgUp` / `PgDn` | Desplazarse por el historial de la consola |
+| `i` / `Enter` | Entrar en modo escritura / foco en input de texto (`InputMode::Insert`) |
+| `s` | Guardar cambios de `server.properties` a disco (pestaña Configuración) |
+| `q` / `Ctrl+C` | Salir limpiamente de la TUI (restaura terminal alternate screen y raw mode) |
+
+### Modo Edición / Inserción (`InputMode::Insert`)
+
+Se activa al enfocar un campo de búsqueda (Modrinth), la línea de comandos (Consola) o el asistente modal de creación (`n`).
+
+*   **Atajos globales desactivados**: Las teclas `q`, `j`, `k`, `Space`, `r` y dígitos `1-4` se comportan como caracteres normales de texto.
+*   `Enter`: Enviar comando a la consola / Iniciar búsqueda en Modrinth / Confirmar creación en el Wizard.
+*   `Esc`: Salir de modo edición y retornar inmediatamente a `InputMode::Normal`.
+
+---
+
+## 📥 Installation & Usage in NixOS
+
+### 1. Ejecución Directa (Sin Instalación)
+
+Prueba la TUI de inmediato en NixOS o cualquier distribución con Nix:
+```bash
+nix run github:AdrianChaSan/mcserman
+```
+
+### 2. Entorno de Desarrollo (`devShell`)
+
+Accede a un entorno reproducible con Rust (`cargo`, `clippy`, `rustfmt`) y los 3 JDKs de Temurin listos:
+```bash
+git clone https://github.com/AdrianChaSan/mcserman.git
+cd mcserman
+nix develop
+```
+
+### 3. Módulo Declarativo en `configuration.nix`
+
+Agrega `mcserman` a los inputs de tu `flake.nix`:
 
 ```nix
 {
@@ -37,20 +83,19 @@ Add `mcserman` to your `flake.nix` inputs:
       modules = [
         ./configuration.nix
 
-        # 1. Import the mcserman module
+        # 1. Importar el módulo de mcserman
         mcserman.nixosModules.default
 
-        # 2. Configure the service
+        # 2. Configurar el servicio
         {
           services.mcserman = {
             enable = true;
-            adminUser = "your_username"; # Optional: grants non-root management permissions
+            adminUser = "your_username"; # Permite gestionar instancias sin sudo
             openFirewall = {
               enable = true;
               port = 25565;
-              interface = null;          # null = all interfaces, or e.g. "tailscale0"
             };
-            javaVersions = [ 21 ];       # Pre-install Temurin JDK versions from Nix store
+            javaVersions = [ 21 17 8 ];  # JDKs Temurin preinstalados desde el Nix Store
           };
         }
       ];
@@ -59,104 +104,76 @@ Add `mcserman` to your `flake.nix` inputs:
 }
 ```
 
-Then rebuild your system:
-```bash
-sudo nixos-rebuild switch
-```
-
 ---
 
-### Method 2: On Any Linux Distribution (Ubuntu, Debian, Fedora, Arch)
+## 🚀 Headless CLI Reference (Scripts & Systemd)
 
-#### Option A: Pre-compiled Binary (Fastest)
-Download the latest standalone executable from [GitHub Releases](https://github.com/AdrianChaSan/mcserman/releases/latest):
+Los subcomandos CLI siguen estando 100% disponibles para automatización y scripts desatendidos:
 
 ```bash
-curl -sSL https://github.com/AdrianChaSan/mcserman/releases/latest/download/mcserman -o mcserman
-chmod +x mcserman
-sudo mv mcserman /usr/local/bin/
-```
-
-#### Option B: Via Cargo (`cargo install`)
-If you have the Rust toolchain installed:
-```bash
-cargo install --git https://github.com/AdrianChaSan/mcserman
-```
-
-#### Option C: Build from Source
-```bash
-git clone https://github.com/AdrianChaSan/mcserman.git
-cd mcserman
-cargo build --release
-sudo install -m 755 target/release/mcserman /usr/local/bin/
-```
-
----
-
-## 🚀 Usage Guide
-
-### 1. Interactive Menu
-Simply run `mcserman` without arguments in your terminal to open the interactive wizard:
-```bash
-mcserman
-```
-
-### 2. Creating an Instance
-```bash
-# Interactive wizard (prompts for loader, version, RAM, port)
-mcserman create
-
-# Non-interactive / Headless creation (for scripts & automated deployments)
+# Crear instancia sin interacción
 mcserman create survival --loader paper --mc-version 1.21.4 --ram 4G --port 25565
-```
 
-### 3. Managing Instances
-```bash
-# List all registered instances and their online/offline state
+# Listar instancias registradas y estado online/offline
 mcserman list
 
-# Start an instance in background
+# Iniciar servidor en segundo plano
 mcserman start survival
 
-# View live console logs (colorized, follow mode)
+# Seguir logs en tiempo real (stdout)
 mcserman logs survival -f
 
-# Attach to interactive console (type commands in real time; ':q' or 'exit' to detach)
-mcserman console survival
-
-# Execute a single command without attaching
-mcserman cmd survival "say Hello from mcserman!"
+# Ejecutar comandos de consola
 mcserman cmd survival "time set day"
+mcserman cmd survival "say Servidor actualizándose..."
 
-# Stop the server cleanly (safely writes 'stop' to save the world)
+# Detener limpiamente (envía 'stop' a la JVM para guardar mundos)
 mcserman stop survival
 
-# Restart the instance
+# Reiniciar instancia
 mcserman restart survival
-```
 
-### 4. Installing Mods & Plugins from Modrinth
-Search and install compatible mods/plugins directly from the terminal with automatic SHA-512 verification:
-```bash
-mcserman add-mod survival
+# Instalar mods o plugins desde Modrinth vía CLI
+mcserman add-mod survival --query "voicechat"
 ```
 
 ---
 
-## 🛠️ Architecture & Under the Hood
+## 🛠️ Architecture
 
-### Native Process Supervisor (No `tmux` Required)
-Instead of relying on external terminal multiplexers, `mcserman` runs a native daemon (`mcserman daemon <instance>`) that:
-- Spawns the JVM as a managed child process.
-- Binds a Unix Domain Socket (`$XDG_RUNTIME_DIR/mcserver/<instance>.sock` or `/run/mcserver/<instance>.sock`).
-- Relays incoming IPC commands into the standard input of the Java process.
-- Intercepts POSIX signals (`SIGTERM`, `SIGINT`) to send `"stop\n"` into Java's stdin, waiting up to 60 seconds for world consistency before terminating with exit code 0.
-
-### Hybrid Java Resolution
-When an instance starts (e.g. Minecraft 1.21.4 requiring Java 21), `mcserman` locates Java in the following order:
-1. **Injected Environment Variables:** e.g. `MCSERVER_JAVA_21_PATH` (provided seamlessly by the NixOS module).
-2. **System `$PATH`:** Checks `java -version` for a matching version.
-3. **Automated Adoptium API Fallback:** If not found, downloads and unpacks the official Eclipse Temurin JDK for your architecture directly into `~/.local/share/mcserver/runtimes/`.
+```
+                  ┌────────────────────────┐
+                  │      Terminal TTY      │
+                  └───────────┬────────────┘
+                              │
+               ┌──────────────┴──────────────┐
+               │                             │
+    (sin argumentos)                 (con subcomandos)
+               ▼                             ▼
+   ┌───────────────────────┐     ┌───────────────────────┐
+   │      Ratatui TUI      │     │     Headless CLI      │
+   │  - AppState           │     │  - clap subcommands   │
+   │  - Crossterm EventLoop│     │  - scripts / systemd  │
+   │  - TerminalGuard      │     └───────────┬───────────┘
+   └───────────┬───────────┘                 │
+               │                             │
+               └──────────────┬──────────────┘
+                              │
+                              ▼
+                 ┌─────────────────────────┐
+                 │  spawn_daemon_detached  │
+                 │   - POSIX setsid()      │
+                 │   - Tokio Async Reaper  │
+                 └────────────┬────────────┘
+                              │
+                              ▼
+                 ┌─────────────────────────┐
+                 │     mcserman daemon     │
+                 │   - Unix Domain Socket  │
+                 │   - JVM Child Process   │
+                 │   - Auto SIGTERM 'stop' │
+                 └─────────────────────────┘
+```
 
 ---
 

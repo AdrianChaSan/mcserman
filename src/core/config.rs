@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,7 +28,10 @@ impl std::str::FromStr for LoaderType {
             "vanilla" => Ok(LoaderType::Vanilla),
             "paper" => Ok(LoaderType::Paper),
             "fabric" => Ok(LoaderType::Fabric),
-            other => anyhow::bail!("Loader no soportado: '{}'. Opciones válidas: vanilla, paper, fabric", other),
+            other => anyhow::bail!(
+                "Loader no soportado: '{}'. Opciones válidas: vanilla, paper, fabric",
+                other
+            ),
         }
     }
 }
@@ -91,8 +94,9 @@ impl InstanceConfig {
         }
         let content = toml::to_string_pretty(self)
             .context("Error al serializar la configuración a formato TOML")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("No se pudo escribir la configuración en {}", path.display()))?;
+        std::fs::write(path, content).with_context(|| {
+            format!("No se pudo escribir la configuración en {}", path.display())
+        })?;
         Ok(())
     }
 
@@ -119,7 +123,10 @@ mod tests {
 
     #[test]
     fn test_loader_type_parsing() {
-        assert_eq!("vanilla".parse::<LoaderType>().unwrap(), LoaderType::Vanilla);
+        assert_eq!(
+            "vanilla".parse::<LoaderType>().unwrap(),
+            LoaderType::Vanilla
+        );
         assert_eq!("paper".parse::<LoaderType>().unwrap(), LoaderType::Paper);
         assert_eq!("fabric".parse::<LoaderType>().unwrap(), LoaderType::Fabric);
         assert!("forge".parse::<LoaderType>().is_err());
@@ -127,7 +134,11 @@ mod tests {
 
     #[test]
     fn test_instance_config_defaults() {
-        let cfg = InstanceConfig::new("survival".to_string(), LoaderType::Paper, "1.21.4".to_string());
+        let cfg = InstanceConfig::new(
+            "survival".to_string(),
+            LoaderType::Paper,
+            "1.21.4".to_string(),
+        );
         assert_eq!(cfg.name, "survival");
         assert_eq!(cfg.loader, LoaderType::Paper);
         assert_eq!(cfg.server_jar, "paper-1.21.4.jar");

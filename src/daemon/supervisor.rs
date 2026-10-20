@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
+use colored::Colorize;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{bail, Context, Result};
-use colored::Colorize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::Command;
@@ -13,21 +13,76 @@ use crate::core::config::InstanceConfig;
 use crate::core::paths::SystemPaths;
 use crate::daemon::socket::{SocketRequest, SocketResponse};
 
+/// Lanza el subproceso daemon de mcserman completamente desacoplado de la terminal actual y
+/// previene la acumulación de procesos zombie (<defunct>) mediante un reaper asíncrono.
+///
+/// 1. `Stdio::null()` para no interferir ni corromper el Alternate Screen de la TUI o terminal.
+/// 2. `setsid()` en sistemas Unix para que sea líder de sesión independiente (sobrevive
+///    si la terminal o TUI se cierra y desvincula la señal SIGHUP de la terminal).
+/// 3. Reaper en `tokio::spawn` ejecutando `.wait().await` para recolectar el código de salida
+///    cuando el daemon termine mientras la TUI o el CLI sigan en ejecución.
+pub fn spawn_daemon_detached(instance_name: &str) -> Result<()> {
+    let current_exe =
+        std::env::current_exe().context("No se pudo obtener la ruta del ejecutable")?;
+    let mut cmd = tokio::process::Command::new(current_exe);
+    cmd.arg("daemon")
+        .arg(instance_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.as_std_mut().pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Error al lanzar el daemon de '{}'", instance_name))?;
+
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    Ok(())
+}
+
 pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> {
     let instance_dir = paths.instance_dir(instance_name);
     let config_path = paths.instance_config(instance_name);
 
     if !config_path.exists() {
-        bail!("La instancia '{}' no existe en {}", instance_name, instance_dir.display());
+        bail!(
+            "La instancia '{}' no existe en {}",
+            instance_name,
+            instance_dir.display()
+        );
     }
 
     let config = InstanceConfig::load(&config_path)?;
-    println!("{}", format!("🚀 Iniciando daemon para instancia '{}' (Minecraft {} via {})...",
-        config.name, config.mc_version, config.loader).green().bold());
+    println!(
+        "{}",
+        format!(
+            "🚀 Iniciando daemon para instancia '{}' (Minecraft {} via {})...",
+            config.name, config.mc_version, config.loader
+        )
+        .green()
+        .bold()
+    );
 
     // 1. Asegurar EULA
     let eula_path = instance_dir.join("eula.txt");
-    if !eula_path.exists() || !std::fs::read_to_string(&eula_path).unwrap_or_default().contains("eula=true") {
+    if !eula_path.exists()
+        || !std::fs::read_to_string(&eula_path)
+            .unwrap_or_default()
+            .contains("eula=true")
+    {
         std::fs::write(&eula_path, "eula=true\n")
             .context("No se pudo escribir eula.txt con eula=true")?;
     }
@@ -36,7 +91,12 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     let java_bin = if let Some(ref custom_java) = config.java_path {
         custom_java.clone()
     } else {
-        crate::core::java::resolve_java(config.java_version, paths).await?
+        crate::core::java::resolve_java(
+            config.java_version,
+            paths,
+            &crate::core::progress::SilentProgressReporter,
+        )
+        .await?
     };
 
     // 3. Preparar socket
@@ -46,8 +106,12 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         let _ = std::fs::remove_file(&socket_path);
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("No se pudo enlazar el Unix Socket en {}", socket_path.display()))?;
+    let listener = UnixListener::bind(&socket_path).with_context(|| {
+        format!(
+            "No se pudo enlazar el Unix Socket en {}",
+            socket_path.display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
@@ -64,12 +128,17 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     let log_file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&latest_log_path).await?;
+        .open(&latest_log_path)
+        .await?;
     let log_file = Arc::new(Mutex::new(log_file));
 
     // 5. Lanzar proceso Java
     let jvm_args = config.jvm_args();
-    println!("☕ Ejecutando: {} {}", java_bin.display(), jvm_args.join(" "));
+    println!(
+        "☕ Ejecutando: {} {}",
+        java_bin.display(),
+        jvm_args.join(" ")
+    );
 
     let mut child = Command::new(&java_bin)
         .args(&jvm_args)
@@ -78,16 +147,30 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Fallo al arrancar el proceso JVM con {}", java_bin.display()))?;
+        .with_context(|| {
+            format!(
+                "Fallo al arrancar el proceso JVM con {}",
+                java_bin.display()
+            )
+        })?;
 
     let child_pid = child.id().unwrap_or(0);
-    println!("{}", format!("✓ Proceso Java en ejecución con PID {}", child_pid).green());
+    println!(
+        "{}",
+        format!("✓ Proceso Java en ejecución con PID {}", child_pid).green()
+    );
 
-    let child_stdin = child.stdin.take().context("No se pudo capturar stdin de Java")?;
+    let child_stdin = child
+        .stdin
+        .take()
+        .context("No se pudo capturar stdin de Java")?;
     let child_stdin = Arc::new(Mutex::new(child_stdin));
 
     // Canalizar stdout
-    let child_stdout = child.stdout.take().context("No se pudo capturar stdout de Java")?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .context("No se pudo capturar stdout de Java")?;
     let log_file_clone1 = Arc::clone(&log_file);
     tokio::spawn(async move {
         let mut reader = BufReader::new(child_stdout).lines();
@@ -103,7 +186,10 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     });
 
     // Canalizar stderr
-    let child_stderr = child.stderr.take().context("No se pudo capturar stderr de Java")?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .context("No se pudo capturar stderr de Java")?;
     let log_file_clone2 = Arc::clone(&log_file);
     tokio::spawn(async move {
         let mut reader = BufReader::new(child_stderr).lines();
@@ -119,42 +205,43 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     // 6. Loop de Socket y Señales de Apagado
     let stdin_for_socket = Arc::clone(&child_stdin);
     let socket_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _addr)) => {
-                    let stdin_ref = Arc::clone(&stdin_for_socket);
-                    tokio::spawn(async move {
-                        let mut reader = BufReader::new(&mut stream);
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.is_ok() {
-                            let resp = match serde_json::from_str::<SocketRequest>(&line) {
-                                Ok(SocketRequest::Command(cmd)) => {
-                                    let mut stdin = stdin_ref.lock().await;
-                                    let full_cmd = format!("{}\n", cmd);
-                                    if stdin.write_all(full_cmd.as_bytes()).await.is_ok() && stdin.flush().await.is_ok() {
-                                        SocketResponse::Ok(format!("Comando '{}' enviado", cmd))
-                                    } else {
-                                        SocketResponse::Error("Fallo al escribir en stdin de Java".to_string())
-                                    }
-                                }
-                                Ok(SocketRequest::Stop) => {
-                                    let mut stdin = stdin_ref.lock().await;
-                                    let _ = stdin.write_all(b"stop\n").await;
-                                    let _ = stdin.flush().await;
-                                    SocketResponse::Ok("Orden de apagado limpio 'stop' enviada".to_string())
-                                }
-                                Ok(SocketRequest::Ping) => SocketResponse::Ok("pong".to_string()),
-                                Ok(SocketRequest::Status) => SocketResponse::Ok(format!("Running (PID {})", child_pid)),
-                                Err(e) => SocketResponse::Error(format!("Petición inválida: {}", e)),
-                            };
-
-                            let resp_json = serde_json::to_string(&resp).unwrap_or_default() + "\n";
-                            let _ = stream.write_all(resp_json.as_bytes()).await;
+        while let Ok((mut stream, _addr)) = listener.accept().await {
+            let stdin_ref = Arc::clone(&stdin_for_socket);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_ok() {
+                    let resp = match serde_json::from_str::<SocketRequest>(&line) {
+                        Ok(SocketRequest::Command(cmd)) => {
+                            let mut stdin = stdin_ref.lock().await;
+                            let full_cmd = format!("{}\n", cmd);
+                            if stdin.write_all(full_cmd.as_bytes()).await.is_ok()
+                                && stdin.flush().await.is_ok()
+                            {
+                                SocketResponse::Ok(format!("Comando '{}' enviado", cmd))
+                            } else {
+                                SocketResponse::Error(
+                                    "Fallo al escribir en stdin de Java".to_string(),
+                                )
+                            }
                         }
-                    });
+                        Ok(SocketRequest::Stop) => {
+                            let mut stdin = stdin_ref.lock().await;
+                            let _ = stdin.write_all(b"stop\n").await;
+                            let _ = stdin.flush().await;
+                            SocketResponse::Ok("Orden de apagado limpio 'stop' enviada".to_string())
+                        }
+                        Ok(SocketRequest::Ping) => SocketResponse::Ok("pong".to_string()),
+                        Ok(SocketRequest::Status) => {
+                            SocketResponse::Ok(format!("Running (PID {})", child_pid))
+                        }
+                        Err(e) => SocketResponse::Error(format!("Petición inválida: {}", e)),
+                    };
+
+                    let resp_json = serde_json::to_string(&resp).unwrap_or_default() + "\n";
+                    let _ = stream.write_all(resp_json.as_bytes()).await;
                 }
-                Err(_) => break,
-            }
+            });
         }
     });
 

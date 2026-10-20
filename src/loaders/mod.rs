@@ -1,23 +1,30 @@
-pub mod vanilla;
-pub mod paper;
 pub mod fabric;
+pub mod paper;
+pub mod vanilla;
 
-use std::path::Path;
-use anyhow::Result;
 use crate::core::config::LoaderType;
+use anyhow::Result;
+use std::path::Path;
 
-pub async fn download_server_jar(loader: LoaderType, mc_version: &str, target_path: &Path) -> Result<Option<String>> {
+use crate::core::progress::ProgressReporter;
+
+pub async fn download_server_jar(
+    loader: LoaderType,
+    mc_version: &str,
+    target_path: &Path,
+    reporter: &dyn ProgressReporter,
+) -> Result<Option<String>> {
     match loader {
         LoaderType::Vanilla => {
-            vanilla::download_vanilla(mc_version, target_path).await?;
+            vanilla::download_vanilla(mc_version, target_path, reporter).await?;
             Ok(None)
         }
         LoaderType::Paper => {
-            let build = paper::download_paper(mc_version, target_path).await?;
+            let build = paper::download_paper(mc_version, target_path, reporter).await?;
             Ok(Some(build))
         }
         LoaderType::Fabric => {
-            let loader_ver = fabric::download_fabric(mc_version, target_path).await?;
+            let loader_ver = fabric::download_fabric(mc_version, target_path, reporter).await?;
             Ok(Some(loader_ver))
         }
     }
@@ -30,9 +37,15 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
 
     let mut versions = match loader {
         LoaderType::Paper => {
-            let res = client.get("https://fill.papermc.io/v3/projects/paper").send().await?;
+            let res = client
+                .get("https://fill.papermc.io/v3/projects/paper")
+                .send()
+                .await?;
             if !res.status().is_success() {
-                anyhow::bail!("Error al consultar versiones de PaperMC: HTTP {}", res.status());
+                anyhow::bail!(
+                    "Error al consultar versiones de PaperMC: HTTP {}",
+                    res.status()
+                );
             }
             let data: serde_json::Value = res.json().await?;
             let mut list = Vec::new();
@@ -52,15 +65,25 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
             list
         }
         LoaderType::Fabric => {
-            let res = client.get("https://meta.fabricmc.net/v2/versions/game").send().await?;
+            let res = client
+                .get("https://meta.fabricmc.net/v2/versions/game")
+                .send()
+                .await?;
             if !res.status().is_success() {
-                anyhow::bail!("Error al consultar versiones de Fabric: HTTP {}", res.status());
+                anyhow::bail!(
+                    "Error al consultar versiones de Fabric: HTTP {}",
+                    res.status()
+                );
             }
             let data: serde_json::Value = res.json().await?;
             let mut list = Vec::new();
             if let Some(arr) = data.as_array() {
                 for item in arr {
-                    if item.get("stable").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    if item
+                        .get("stable")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false)
+                    {
                         if let Some(v) = item.get("version").and_then(|s| s.as_str()) {
                             list.push(v.to_string());
                         }
@@ -70,9 +93,15 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
             list
         }
         LoaderType::Vanilla => {
-            let res = client.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json").send().await?;
+            let res = client
+                .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+                .send()
+                .await?;
             if !res.status().is_success() {
-                anyhow::bail!("Error al consultar versiones de Mojang: HTTP {}", res.status());
+                anyhow::bail!(
+                    "Error al consultar versiones de Mojang: HTTP {}",
+                    res.status()
+                );
             }
             let data: serde_json::Value = res.json().await?;
             let mut list = Vec::new();
@@ -115,6 +144,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires network access (skipped in NixOS build sandbox)"]
     async fn test_fetch_paper_versions() {
         let versions = fetch_available_versions(&LoaderType::Paper).await.unwrap();
         assert!(!versions.is_empty());
@@ -122,6 +152,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access (skipped in NixOS build sandbox)"]
     async fn test_fetch_fabric_versions() {
         let versions = fetch_available_versions(&LoaderType::Fabric).await.unwrap();
         assert!(!versions.is_empty());
@@ -129,8 +160,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires network access (skipped in NixOS build sandbox)"]
     async fn test_fetch_vanilla_versions() {
-        let versions = fetch_available_versions(&LoaderType::Vanilla).await.unwrap();
+        let versions = fetch_available_versions(&LoaderType::Vanilla)
+            .await
+            .unwrap();
         assert!(!versions.is_empty());
         assert!(versions.iter().any(|v| v == "1.21.4" || v == "1.16.5"));
     }
@@ -147,14 +181,9 @@ mod tests {
             "26.1.2".to_string(),
         ];
         sort_minecraft_versions(&mut sample);
-        assert_eq!(sample, vec![
-            "26.3",
-            "26.1.2",
-            "1.21.4",
-            "1.20.4",
-            "1.9.4",
-            "1.8.8",
-            "1.7.10",
-        ]);
+        assert_eq!(
+            sample,
+            vec!["26.3", "26.1.2", "1.21.4", "1.20.4", "1.9.4", "1.8.8", "1.7.10",]
+        );
     }
 }

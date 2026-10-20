@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct SystemPaths {
@@ -28,7 +28,16 @@ impl SystemPaths {
         // Si corre como root o /var/lib/mcserver existe y es accesible
         let var_lib = Path::new("/var/lib/mcserver");
         if var_lib.exists() && var_lib.is_dir() {
-            let sock_dir = PathBuf::from("/run/mcserver");
+            let run_mcserver = Path::new("/run/mcserver");
+            let sock_dir = if run_mcserver.exists() || std::fs::create_dir_all(run_mcserver).is_ok()
+            {
+                run_mcserver.to_path_buf()
+            } else if let Ok(xdg_runtime) = std::env::var("XDG_RUNTIME_DIR") {
+                PathBuf::from(xdg_runtime).join("mcserver")
+            } else {
+                var_lib.join("run")
+            };
+
             return Self {
                 base_dir: var_lib.to_path_buf(),
                 instances_dir: var_lib.join("instances"),

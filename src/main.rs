@@ -1,23 +1,29 @@
+mod cli;
 mod core;
 mod daemon;
 mod loaders;
 mod modrinth;
-mod cli;
+mod tui;
 
 use clap::Parser;
-use colored::Colorize;
 use cli::args::{Cli, Commands};
 use core::paths::SystemPaths;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
     let paths = SystemPaths::resolve();
     paths.ensure_dirs()?;
 
-    let cli = Cli::parse();
-
     match cli.command {
-        Some(Commands::Create { name, loader, mc_version, ram, port }) => {
+        Some(Commands::Create {
+            name,
+            loader,
+            mc_version,
+            ram,
+            port,
+        }) => {
             cli::handle_create(name, loader, mc_version, ram, port, &paths).await?;
         }
         Some(Commands::List) => {
@@ -35,7 +41,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Status { name }) => {
             cli::handle_status(name, &paths).await?;
         }
-        Some(Commands::Logs { name, follow, lines }) => {
+        Some(Commands::Logs {
+            name,
+            follow,
+            lines,
+        }) => {
             cli::handle_logs(name, follow, lines, &paths).await?;
         }
         Some(Commands::Cmd { name, command }) => {
@@ -53,37 +63,7 @@ async fn main() -> anyhow::Result<()> {
         None => {
             // Si se ejecuta 'mcserman' sin argumentos y está en una terminal interactiva (TTY)
             if cli::prompts::is_tty() {
-                println!("{}", "⛏️  mcserman - Gestor de Servidores de Minecraft".cyan().bold());
-                let options = vec![
-                    "1. Listar servidores existentes",
-                    "2. Iniciar un servidor",
-                    "3. Ver logs en vivo (tail -f)",
-                    "4. Abrir consola interactiva",
-                    "5. Detener un servidor",
-                    "6. Crear nuevo servidor",
-                    "7. Instalar mod o plugin desde Modrinth",
-                    "8. Salir",
-                ];
-
-                let selection = cli::prompts::handle_inquire_cancel(
-                    inquire::Select::new("¿Qué deseas hacer?", options).prompt()
-                )?;
-
-                if selection.starts_with("1") {
-                    cli::handle_list(&paths).await?;
-                } else if selection.starts_with("2") {
-                    cli::handle_start(None, &paths).await?;
-                } else if selection.starts_with("3") {
-                    cli::handle_logs(None, true, 50, &paths).await?;
-                } else if selection.starts_with("4") {
-                    cli::handle_console(None, &paths).await?;
-                } else if selection.starts_with("5") {
-                    cli::handle_stop(None, &paths).await?;
-                } else if selection.starts_with("6") {
-                    cli::handle_create(None, None, None, None, None, &paths).await?;
-                } else if selection.starts_with("7") {
-                    cli::handle_add_mod(None, None, &paths).await?;
-                }
+                tui::run(&paths).await?;
             } else {
                 // Ejecución desatendida sin argumentos: imprimir ayuda
                 use clap::CommandFactory;

@@ -1,8 +1,8 @@
-use std::io::IsTerminal;
+use crate::core::config::LoaderType;
 use anyhow::{bail, Result};
 use colored::Colorize;
 use inquire::{InquireError, Select, Text};
-use crate::core::config::LoaderType;
+use std::io::IsTerminal;
 
 pub fn is_tty() -> bool {
     std::io::stdin().is_terminal()
@@ -32,9 +32,7 @@ pub fn select_instance(instances: &[String], prompt_text: &str) -> Result<String
         bail!("Se requiere especificar el nombre de la instancia en entornos no interactivos.");
     }
 
-    let choice = handle_inquire_cancel(
-        Select::new(prompt_text, instances.to_vec()).prompt()
-    )?;
+    let choice = handle_inquire_cancel(Select::new(prompt_text, instances.to_vec()).prompt())?;
     Ok(choice)
 }
 
@@ -53,7 +51,7 @@ pub fn prompt_loader(loader: Option<String>) -> Result<LoaderType> {
     ];
 
     let choice = handle_inquire_cancel(
-        Select::new("Selecciona el tipo de servidor (Loader):", options).prompt()
+        Select::new("Selecciona el tipo de servidor (Loader):", options).prompt(),
     )?;
 
     if choice.starts_with("paper") {
@@ -79,7 +77,13 @@ pub async fn prompt_mc_version(version: Option<String>, loader: &LoaderType) -> 
     let fetched = match crate::loaders::fetch_available_versions(loader).await {
         Ok(vers) if !vers.is_empty() => vers,
         _ => {
-            vec!["1.21.4".to_string(), "1.21.1".to_string(), "1.20.4".to_string(), "1.20.1".to_string(), "1.16.5".to_string()]
+            vec![
+                "1.21.4".to_string(),
+                "1.21.1".to_string(),
+                "1.20.4".to_string(),
+                "1.20.1".to_string(),
+                "1.16.5".to_string(),
+            ]
         }
     };
     print!("\r\x1b[2K");
@@ -89,14 +93,17 @@ pub async fn prompt_mc_version(version: Option<String>, loader: &LoaderType) -> 
     options.push("Otra versión personalizada...".to_string());
 
     let choice = handle_inquire_cancel(
-        Select::new("Selecciona la versión de Minecraft (puedes escribir para filtrar):", options)
-            .with_page_size(15)
-            .prompt()
+        Select::new(
+            "Selecciona la versión de Minecraft (puedes escribir para filtrar):",
+            options,
+        )
+        .with_page_size(15)
+        .prompt(),
     )?;
 
     if choice.starts_with("Otra") {
         let custom = handle_inquire_cancel(
-            Text::new("Ingresa la versión exacta de Minecraft (ej. 1.21.4):").prompt()
+            Text::new("Ingresa la versión exacta de Minecraft (ej. 1.21.4):").prompt(),
         )?;
         Ok(custom.trim().to_string())
     } else {
@@ -113,8 +120,6 @@ pub fn prompt_string(val: Option<String>, prompt_text: &str, default: &str) -> R
         return Ok(default.to_string());
     }
 
-    let res = handle_inquire_cancel(
-        Text::new(prompt_text).with_default(default).prompt()
-    )?;
+    let res = handle_inquire_cancel(Text::new(prompt_text).with_default(default).prompt())?;
     Ok(res.trim().to_string())
 }

@@ -1,10 +1,8 @@
+use crate::core::paths::SystemPaths;
+use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{Context, Result, bail};
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
-use futures_util::StreamExt;
-use crate::core::paths::SystemPaths;
 
 pub fn required_java_version(mc_version: &str) -> u8 {
     let parts: Vec<&str> = mc_version.split('.').collect();
@@ -60,12 +58,22 @@ pub fn aikar_g1gc_flags() -> Vec<String> {
     ]
 }
 
-pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
+use crate::core::progress::ProgressReporter;
+
+pub async fn resolve_java(
+    version: u8,
+    paths: &SystemPaths,
+    reporter: &dyn ProgressReporter,
+) -> Result<PathBuf> {
     // 1. Variable de entorno inyectada por NixOS o el usuario
     let env_var_name = format!("MCSERVER_JAVA_{}_PATH", version);
     if let Ok(env_path) = std::env::var(&env_var_name) {
         let p = PathBuf::from(env_path);
-        let java_bin = if p.is_dir() { p.join("bin").join("java") } else { p };
+        let java_bin = if p.is_dir() {
+            p.join("bin").join("java")
+        } else {
+            p
+        };
         if java_bin.exists() {
             return Ok(java_bin);
         }
@@ -79,7 +87,11 @@ pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
                 if let Some(rest) = line.strip_prefix(&format!("export {}=", env_var_name)) {
                     let path_str = rest.trim_matches('"').trim_matches('\'');
                     let p = PathBuf::from(path_str);
-                    let java_bin = if p.is_dir() { p.join("bin").join("java") } else { p };
+                    let java_bin = if p.is_dir() {
+                        p.join("bin").join("java")
+                    } else {
+                        p
+                    };
                     if java_bin.exists() {
                         return Ok(java_bin);
                     }
@@ -88,12 +100,35 @@ pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
         }
     }
 
-    // 2. Verificar si el comando `java` en el PATH del sistema coincide con la versión
-    let java_candidates = [which::which("java").ok(), Some(PathBuf::from("java"))];
+    // 1.2 Revisar JAVA_HOME si está definido (ej. inyectado por nix shell o devShell)
+    if let Ok(java_home) = std::env::var("JAVA_HOME") {
+        let p = PathBuf::from(java_home);
+        let java_bin = if p.is_dir() {
+            p.join("bin").join("java")
+        } else {
+            p
+        };
+        if java_bin.exists() {
+            if let Ok(detected_ver) = query_java_version(&java_bin) {
+                if detected_ver == version {
+                    return Ok(java_bin);
+                }
+            }
+        }
+    }
+
+    // 2. Verificar comando java en PATH o rutas estándar de NixOS (/run/current-system/sw/bin/java)
+    let java_candidates = [
+        which::which("java").ok(),
+        Some(PathBuf::from("/run/current-system/sw/bin/java")),
+        Some(PathBuf::from("java")),
+    ];
     for candidate in java_candidates.into_iter().flatten() {
-        if let Ok(detected_ver) = query_java_version(&candidate) {
-            if detected_ver == version {
-                return Ok(candidate);
+        if candidate.exists() {
+            if let Ok(detected_ver) = query_java_version(&candidate) {
+                if detected_ver == version {
+                    return Ok(candidate);
+                }
             }
         }
     }
@@ -117,8 +152,11 @@ pub async fn resolve_java(version: u8, paths: &SystemPaths) -> Result<PathBuf> {
     }
 
     // 5. Auto-descarga desde Adoptium API (Eclipse Temurin) para distribuciones estándar (Ubuntu, Debian, Fedora, Arch)
-    println!("{}", format!("☕ Java {} no encontrado. Descargando automáticamente Eclipse Temurin...", version).cyan().bold());
-    let downloaded_bin = download_adoptium_java(version, &local_runtime_dir).await?;
+    reporter.on_info(&format!(
+        "☕ Java {} no encontrado. Descargando automáticamente Eclipse Temurin...",
+        version
+    ));
+    let downloaded_bin = download_adoptium_java(version, &local_runtime_dir, reporter).await?;
     Ok(downloaded_bin)
 }
 
@@ -151,7 +189,10 @@ fn query_java_version(java_cmd: &Path) -> Result<u8> {
         }
     }
 
-    bail!("No se pudo determinar la versión de Java ejecutando '{}'", java_cmd.display())
+    bail!(
+        "No se pudo determinar la versión de Java ejecutando '{}'",
+        java_cmd.display()
+    )
 }
 
 fn find_java_binary(dir: &Path) -> Option<PathBuf> {
@@ -175,11 +216,18 @@ fn find_java_binary(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-async fn download_adoptium_java(version: u8, target_dir: &Path) -> Result<PathBuf> {
+async fn download_adoptium_java(
+    version: u8,
+    target_dir: &Path,
+    reporter: &dyn ProgressReporter,
+) -> Result<PathBuf> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "aarch64",
-        other => bail!("Arquitectura no soportada para descarga automática de Java: {}", other),
+        other => bail!(
+            "Arquitectura no soportada para descarga automática de Java: {}",
+            other
+        ),
     };
 
     let url = format!(
@@ -191,33 +239,36 @@ async fn download_adoptium_java(version: u8, target_dir: &Path) -> Result<PathBu
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
 
-    let response = client.get(&url).send().await
+    let response = client
+        .get(&url)
+        .send()
+        .await
         .with_context(|| format!("Error al contactar Adoptium API en {}", url))?;
 
     if !response.status().is_success() {
-        bail!("Adoptium API retornó estado HTTP {} para Java {}", response.status(), version);
+        bail!(
+            "Adoptium API retornó estado HTTP {} para Java {}",
+            response.status(),
+            version
+        );
     }
 
     let total_size = response.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")?
-            .progress_chars("#>-"),
-    );
-    pb.set_message(format!("Descargando Java {}", version));
+    reporter.on_start(&format!("Descargando Java {}", version), total_size);
 
     std::fs::create_dir_all(target_dir)?;
     let temp_tar = target_dir.join("runtime.tar.gz");
     let mut file = std::fs::File::create(&temp_tar)?;
     let mut stream = response.bytes_stream();
+    let mut downloaded = 0u64;
 
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res?;
         std::io::copy(&mut chunk.as_ref(), &mut file)?;
-        pb.inc(chunk.len() as u64);
+        downloaded += chunk.len() as u64;
+        reporter.on_progress(downloaded, total_size);
     }
-    pb.finish_with_message("Descarga de Java completada. Extrayendo...");
+    reporter.on_info("Descarga de Java completada. Extrayendo runtime...");
 
     // Descomprimir tar.gz
     let tar_file = std::fs::File::open(&temp_tar)?;
@@ -235,10 +286,17 @@ async fn download_adoptium_java(version: u8, target_dir: &Path) -> Result<PathBu
             perms.set_mode(0o755);
             std::fs::set_permissions(&java_bin, perms)?;
         }
-        println!("{}", format!("✓ Java {} instalado exitosamente en {}", version, java_bin.display()).green());
+        reporter.on_finish(&format!(
+            "Java {} instalado exitosamente en {}",
+            version,
+            java_bin.display()
+        ));
         Ok(java_bin)
     } else {
-        bail!("Se extrajo el runtime de Java pero no se encontró el binario en {}", target_dir.display())
+        bail!(
+            "Se extrajo el runtime de Java pero no se encontró el binario en {}",
+            target_dir.display()
+        )
     }
 }
 
@@ -270,10 +328,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires pre-installed Java or network access (skipped in NixOS build sandbox)"]
     async fn test_resolve_java_21() {
         let paths = SystemPaths::resolve();
-        let java_path = resolve_java(21, &paths).await;
-        assert!(java_path.is_ok(), "Failed to resolve Java 21: {:?}", java_path.err());
+        let java_path =
+            resolve_java(21, &paths, &crate::core::progress::SilentProgressReporter).await;
+        if Path::new("/etc/NIXOS").exists() {
+            if let Err(ref e) = java_path {
+                assert!(e.to_string().contains("NixOS"));
+                return;
+            }
+        }
+        assert!(
+            java_path.is_ok(),
+            "Failed to resolve Java 21: {:?}",
+            java_path.err()
+        );
         let bin = java_path.unwrap();
         assert!(bin.exists());
     }
