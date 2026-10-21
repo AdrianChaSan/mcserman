@@ -1,40 +1,47 @@
-use crate::tui::app::App;
+use crate::tui::app::{App, InputMode};
 use crate::tui::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Padding, Paragraph};
 
 pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let popup = centered_rect(64, 75, area);
+    // 1. Fondo de atenuación (dimming) sobre la pantalla completa
+    let dim_block = Block::default().style(Style::default().bg(Color::Rgb(10, 10, 15)));
+    f.render_widget(dim_block, area);
 
-    // Limpiar el fondo del modal
+    // 2. Rectángulo centrado para el modal
+    let popup = centered_rect(68, 80, area);
+
+    // 3. Limpiar fondo y renderizar bloque modal opaco con doble borde y padding
     f.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Double)
         .border_style(theme.active_border)
-        .title(" 🛠️  Crear Nueva Instancia de Servidor ");
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)))
+        .title(" 🛠️  Crear Nueva Instancia de Servidor ")
+        .padding(Padding::uniform(1));
 
+    let content_area = block.inner(popup);
     f.render_widget(block, popup);
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Margen superior
             Constraint::Length(3), // 0. Nombre
             Constraint::Length(3), // 1. Loader
             Constraint::Length(3), // 2. Versión
             Constraint::Length(3), // 3. RAM
             Constraint::Length(3), // 4. Puerto
-            Constraint::Length(2), // Error o Progreso
-            Constraint::Length(1), // Barra de ayuda
+            Constraint::Length(2), // 5. Error o Progreso
+            Constraint::Length(1), // 6. Barra de ayuda
         ])
-        .margin(1)
-        .split(popup);
+        .split(content_area);
 
     // 0. Nombre
     draw_input_field(
         f,
-        inner[1],
+        inner[0],
         " Nombre identificador ",
         app.create_name_input.value(),
         app.create_field_idx == 0,
@@ -45,7 +52,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // 1. Loader
     draw_loader_selector(
         f,
-        inner[2],
+        inner[1],
         app.create_loader_idx,
         app.create_field_idx == 1,
         theme,
@@ -54,7 +61,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // 2. Versión
     draw_version_selector(
         f,
-        inner[3],
+        inner[2],
         &app.create_versions,
         app.create_version_idx,
         app.create_loading_versions,
@@ -65,7 +72,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // 3. RAM
     draw_input_field(
         f,
-        inner[4],
+        inner[3],
         " Memoria RAM máxima (ej. 2G, 4G, 8G) ",
         app.create_ram_input.value(),
         app.create_field_idx == 3,
@@ -76,7 +83,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // 4. Puerto
     draw_input_field(
         f,
-        inner[5],
+        inner[4],
         " Puerto TCP del servidor ",
         app.create_port_input.value(),
         app.create_field_idx == 4,
@@ -88,24 +95,45 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if let Some((ratio, ref msg)) = app.create_progress {
         let gauge = Gauge::default()
             .gauge_style(theme.highlight)
+            .style(Style::default().bg(Color::Rgb(18, 18, 24)))
             .ratio((ratio / 100.0).clamp(0.0, 1.0))
             .label(msg.as_str());
-        f.render_widget(gauge, inner[6]);
+        f.render_widget(gauge, inner[5]);
     } else if let Some(ref err) = app.create_error {
-        let p = Paragraph::new(format!(" ✗ {}", err)).style(theme.error);
-        f.render_widget(p, inner[6]);
+        let p = Paragraph::new(format!(" ✗ {}", err))
+            .style(theme.error)
+            .style(Style::default().bg(Color::Rgb(18, 18, 24)).fg(Color::Red));
+        f.render_widget(p, inner[5]);
     }
 
-    // 6. Pie de ayuda
-    let hints = Line::from(vec![
-        Span::styled(" Tab: ", theme.accent),
-        Span::styled("Siguiente   ", theme.base),
-        Span::styled("Enter: ", theme.accent),
-        Span::styled("Crear servidor   ", theme.base),
-        Span::styled("Esc: ", theme.accent),
-        Span::styled("Cancelar", theme.muted),
-    ]);
-    f.render_widget(Paragraph::new(hints), inner[7]);
+    // 6. Pie de ayuda según InputMode
+    let hints = if app.input_mode == InputMode::Insert {
+        Line::from(vec![
+            Span::styled(" Esc: ", theme.accent),
+            Span::styled("Dejar de editar ", theme.muted),
+            Span::styled("│ ", theme.border),
+            Span::styled("Enter: ", theme.accent),
+            Span::styled("Confirmar ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("Tab: ", theme.accent),
+            Span::styled("Siguiente", theme.base),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" Esc: ", theme.accent),
+            Span::styled("Cerrar modal ", theme.muted),
+            Span::styled("│ ", theme.border),
+            Span::styled("i/Enter: ", theme.accent),
+            Span::styled("Editar ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("Tab/↓: ", theme.accent),
+            Span::styled("Siguiente ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("Enter: ", theme.accent),
+            Span::styled("Crear", theme.highlight),
+        ])
+    };
+    f.render_widget(Paragraph::new(hints), inner[6]);
 }
 
 fn draw_input_field(
@@ -125,6 +153,7 @@ fn draw_input_field(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)))
         .title(label);
 
     let p = Paragraph::new(format!(" {}", val)).block(block);
@@ -154,6 +183,7 @@ fn draw_loader_selector(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)))
         .title(" Tipo de Servidor (Modloader) - Flechas ◄ ► ");
 
     let loaders = ["Paper (Recomendado)", "Fabric (Mods)", "Vanilla"];
@@ -187,6 +217,7 @@ fn draw_version_selector(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .style(Style::default().bg(Color::Rgb(18, 18, 24)))
         .title(" Versión de Minecraft - Flechas ◄ ► ");
 
     let line = if is_loading {
@@ -217,21 +248,29 @@ fn draw_version_selector(
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let target_height = ((r.height as u32 * percent_y as u32) / 100) as u16;
+    let actual_height = target_height.max(22).min(r.height.saturating_sub(2));
+    let v_margin = (r.height.saturating_sub(actual_height)) / 2;
+
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Length(v_margin),
+            Constraint::Length(actual_height),
+            Constraint::Min(0),
         ])
         .split(r);
+
+    let target_width = ((r.width as u32 * percent_x as u32) / 100) as u16;
+    let actual_width = target_width.max(64).min(r.width.saturating_sub(2));
+    let h_margin = (r.width.saturating_sub(actual_width)) / 2;
 
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Length(h_margin),
+            Constraint::Length(actual_width),
+            Constraint::Min(0),
         ])
         .split(popup_layout[1])[1]
 }

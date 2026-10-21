@@ -34,7 +34,11 @@ pub async fn download_paper(
     ));
 
     let client = reqwest::Client::builder()
-        .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+        .user_agent(concat!(
+            "mcserman/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://github.com/AdrianChaSan/mcserman)"
+        ))
         .build()?;
 
     let version_url = format!(
@@ -143,7 +147,11 @@ mod tests {
     #[ignore = "requires network access (skipped in NixOS build sandbox)"]
     async fn test_papermc_v3_api_resolves() {
         let client = reqwest::Client::builder()
-            .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+            .user_agent(concat!(
+                "mcserman/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/AdrianChaSan/mcserman)"
+            ))
             .build()
             .unwrap();
         let version_url = "https://fill.papermc.io/v3/projects/paper/versions/1.21.4";

@@ -16,6 +16,9 @@ pub enum Action {
     ToggleServer,
     RefreshInstances,
     SetStatus(String),
+    FocusSidebar,
+    FocusMainPanel,
+    ToggleFocus,
     // Consola
     SubmitConsoleCommand,
     ScrollLogUp(usize),
@@ -28,6 +31,9 @@ pub enum Action {
     ToggleProperty,
     CycleProperty(i8),
     SaveProperties,
+    StartEditProperty,
+    CancelEditProperty,
+    SubmitEditProperty,
     // Modal Creación
     OpenCreateModal,
     CloseCreateModal,

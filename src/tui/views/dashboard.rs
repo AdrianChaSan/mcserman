@@ -1,19 +1,46 @@
-use crate::tui::app::App;
+use crate::tui::app::{App, Focus, ServerState};
 use crate::tui::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let border_style = if app.focus == Focus::MainPanel {
+        theme.active_border
+    } else {
+        theme.border
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.border)
+        .border_style(border_style)
         .title(" Resumen de Servidor ");
 
     if let Some(inst) = app.selected() {
-        let status_span = if inst.is_online {
-            Span::styled("● ONLINE (En ejecución)", theme.success)
-        } else {
-            Span::styled("○ OFFLINE (Detenido)", theme.muted)
+        let status_badge = match inst.state {
+            ServerState::Online => Span::styled(
+                " [ ● ONLINE ] ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ServerState::Starting => Span::styled(
+                " [ ◐ CARGANDO... ] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ServerState::Stopping => Span::styled(
+                " [ ◐ DETENIENDO... ] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            ServerState::Offline => Span::styled(
+                " [ ○ OFFLINE ] ",
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
         };
 
         let lines = vec![
@@ -24,7 +51,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ]),
             Line::from(vec![
                 Span::styled("  Estado:       ", theme.muted),
-                status_span,
+                status_badge,
             ]),
             Line::from(vec![
                 Span::styled("  Modloader:    ", theme.muted),
@@ -48,21 +75,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                     theme.muted,
                 ),
             ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  Acciones:     ", theme.muted),
-                Span::styled("[Space] ", theme.accent),
-                Span::styled("Iniciar/Detener   ", theme.base),
-                Span::styled("[2] ", theme.accent),
-                Span::styled("Abrir Consola   ", theme.base),
-                Span::styled("[3] ", theme.accent),
-                Span::styled("Mods/Plugins   ", theme.base),
-                Span::styled("[n] ", theme.accent),
-                Span::styled("Nuevo Servidor", theme.base),
-            ]),
         ];
 
-        let p = Paragraph::new(lines).block(block);
+        let p = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         f.render_widget(p, area);
     } else {
         let empty_lines = vec![
@@ -76,7 +93,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 theme.base,
             )),
         ];
-        let p = Paragraph::new(empty_lines).block(block);
+        let p = Paragraph::new(empty_lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
         f.render_widget(p, area);
     }
 }

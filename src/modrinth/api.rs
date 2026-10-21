@@ -11,8 +11,22 @@ pub struct SearchHit {
     pub title: String,
     pub description: String,
     pub slug: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub downloads: Option<u64>,
     pub client_side: String,
     pub server_side: String,
+}
+
+pub fn format_downloads(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +66,11 @@ pub struct ModrinthClient {
 impl ModrinthClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+            .user_agent(concat!(
+                "mcserman/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/AdrianChaSan/mcserman)"
+            ))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }

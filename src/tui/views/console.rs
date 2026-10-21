@@ -1,9 +1,14 @@
-use crate::tui::app::{App, InputMode};
+use crate::tui::app::{App, Focus, InputMode, ServerState};
 use crate::tui::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Limpiar toda el área del Tab 2 antes de dibujar
+    f.render_widget(Clear, area);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -17,42 +22,87 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Limpiar área de logs para prevenir texto fantasma residual
+    f.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let viewport_height = area.height.saturating_sub(2) as usize;
+
+    // 1. Cálculo real de filas visuales con wrap
+    let total_visual_lines: usize = if inner_width == 0 {
+        0
+    } else {
+        app.log_buffer
+            .iter()
+            .map(|raw_line| {
+                let line_len = raw_line.chars().count();
+                (line_len.max(1) + inner_width - 1) / inner_width
+            })
+            .sum()
+    };
+
+    // 2. Clamping estricto del scroll_offset
+    let max_scroll = total_visual_lines.saturating_sub(viewport_height);
+    let clamped_scroll = app.console_scroll.min(max_scroll);
+    let scroll_y = max_scroll.saturating_sub(clamped_scroll);
+
     let title = if let Some(inst) = app.selected() {
-        let scroll_hint = if app.console_scroll > 0 {
-            format!(" [Historial: +{} líneas] ", app.console_scroll)
+        let status_hint = match inst.state {
+            ServerState::Online => "[● En vivo]".to_string(),
+            ServerState::Starting => "[◐ Iniciando...]".to_string(),
+            ServerState::Stopping => "[◐ Deteniendo...]".to_string(),
+            ServerState::Offline => "[○ Offline]".to_string(),
+        };
+        let scroll_hint = if clamped_scroll > 0 {
+            format!(" [Historial: +{} líneas] ", clamped_scroll)
         } else {
-            " [En vivo] ".to_string()
+            format!(" {} ", status_hint)
         };
         format!(" Consola: {} {} ", inst.name, scroll_hint)
     } else {
         " Consola ".to_string()
     };
 
+    let border_style = if app.focus == Focus::MainPanel {
+        theme.active_border
+    } else {
+        theme.border
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.border)
+        .border_style(border_style)
         .title(title);
 
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    let total_lines = app.log_buffer.len();
-    let visible_lines: Vec<Line> = if total_lines == 0 {
+    // 3. Pasar líneas completas y aplicar .scroll((scroll_y, 0))
+    let lines: Vec<Line> = if app.log_buffer.is_empty() {
         vec![Line::from(Span::styled(
             " No hay registros disponibles para esta instancia.",
             theme.muted,
         ))]
     } else {
-        let end_idx = total_lines.saturating_sub(app.console_scroll);
-        let start_idx = end_idx.saturating_sub(inner_height);
-
         app.log_buffer
-            .range(start_idx..end_idx)
+            .iter()
             .map(|raw_line| format_colored_line(raw_line, theme))
             .collect()
     };
 
-    let p = Paragraph::new(visible_lines).block(block);
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll(((scroll_y as u16), 0));
     f.render_widget(p, area);
+
+    // 4. Scrollbar vertical sincronizado con max_scroll y la posición actual
+    if max_scroll > 0 {
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_y);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
 }
 
 fn draw_command_input(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {

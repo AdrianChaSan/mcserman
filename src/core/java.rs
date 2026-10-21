@@ -1,8 +1,86 @@
 use crate::core::paths::SystemPaths;
+use crate::core::progress::ProgressReporter;
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Representa el entorno o binario a través del cual se ejecuta la JVM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JavaRuntime {
+    /// Binario directo en el sistema de archivos (ej. /nix/store/.../bin/java o /usr/bin/java)
+    Direct(PathBuf),
+    /// Envoltorio dinámico mediante nix shell (ej. nix shell nixpkgs#jdk21 -c java ...)
+    NixShell { package: String },
+}
+
+impl JavaRuntime {
+    /// Configura un comando asíncrono `tokio::process::Command` para ejecutar la JVM.
+    pub fn build_tokio_command(&self, jvm_args: &[String]) -> tokio::process::Command {
+        match self {
+            JavaRuntime::Direct(path) => {
+                let mut cmd = tokio::process::Command::new(path);
+                cmd.args(jvm_args);
+                cmd
+            }
+            JavaRuntime::NixShell { package } => {
+                let mut cmd = tokio::process::Command::new("nix");
+                cmd.args([
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "shell",
+                    package,
+                    "-c",
+                    "java",
+                ]);
+                cmd.args(jvm_args);
+                cmd
+            }
+        }
+    }
+
+    /// Configura un comando estándar `std::process::Command` para ejecutar la JVM.
+    #[allow(dead_code)]
+    pub fn build_std_command(&self, jvm_args: &[String]) -> std::process::Command {
+        match self {
+            JavaRuntime::Direct(path) => {
+                let mut cmd = std::process::Command::new(path);
+                cmd.args(jvm_args);
+                cmd
+            }
+            JavaRuntime::NixShell { package } => {
+                let mut cmd = std::process::Command::new("nix");
+                cmd.args([
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "shell",
+                    package,
+                    "-c",
+                    "java",
+                ]);
+                cmd.args(jvm_args);
+                cmd
+            }
+        }
+    }
+
+    /// Retorna una representación legible del comando de ejecución.
+    pub fn display_cmd(&self) -> String {
+        match self {
+            JavaRuntime::Direct(path) => path.display().to_string(),
+            JavaRuntime::NixShell { package } => format!("nix shell {} -c java", package),
+        }
+    }
+
+    /// Retorna la ruta al binario si la ejecución es directa.
+    #[allow(dead_code)]
+    pub fn direct_path(&self) -> Option<&Path> {
+        match self {
+            JavaRuntime::Direct(path) => Some(path.as_path()),
+            JavaRuntime::NixShell { .. } => None,
+        }
+    }
+}
 
 pub fn required_java_version(mc_version: &str) -> u8 {
     let parts: Vec<&str> = mc_version.split('.').collect();
@@ -58,13 +136,86 @@ pub fn aikar_g1gc_flags() -> Vec<String> {
     ]
 }
 
-use crate::core::progress::ProgressReporter;
+pub fn is_nix_available() -> bool {
+    which::which("nix").is_ok() || Path::new("/run/current-system/sw/bin/nix").exists()
+}
+
+pub fn nix_package_for_java(version: u8) -> Option<String> {
+    match version {
+        8 => Some("nixpkgs#jdk8".to_string()),
+        17 => Some("nixpkgs#jdk17".to_string()),
+        21 => Some("nixpkgs#jdk21".to_string()),
+        25 => Some("nixpkgs#jdk25".to_string()),
+        _ => None,
+    }
+}
+
+pub fn find_all_local_javas(paths: &SystemPaths) -> Vec<(u8, PathBuf)> {
+    let mut found = Vec::new();
+    let mut checked_paths = std::collections::HashSet::new();
+
+    let mut add_candidate = |p: PathBuf| {
+        let bin = if p.is_dir() {
+            p.join("bin").join("java")
+        } else {
+            p
+        };
+        if bin.exists() && checked_paths.insert(bin.clone()) {
+            if let Ok(ver) = query_java_version(&bin) {
+                found.push((ver, bin));
+            }
+        }
+    };
+
+    // 1. Variables de entorno conocidas
+    for v in [8, 17, 21, 25] {
+        if let Ok(val) = std::env::var(format!("MCSERVER_JAVA_{}_PATH", v)) {
+            add_candidate(PathBuf::from(val));
+        }
+    }
+
+    // 2. /etc/set-environment (NixOS sessionVariables)
+    if Path::new("/etc/set-environment").exists() {
+        if let Ok(content) = std::fs::read_to_string("/etc/set-environment") {
+            for line in content.lines() {
+                for v in [8, 17, 21, 25] {
+                    let prefix = format!("export MCSERVER_JAVA_{}_PATH=", v);
+                    if let Some(rest) = line.strip_prefix(&prefix) {
+                        let path_str = rest.trim_matches('"').trim_matches('\'');
+                        add_candidate(PathBuf::from(path_str));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. JAVA_HOME
+    if let Ok(java_home) = std::env::var("JAVA_HOME") {
+        add_candidate(PathBuf::from(java_home));
+    }
+
+    // 4. PATH y rutas NixOS
+    if let Ok(p) = which::which("java") {
+        add_candidate(p);
+    }
+    add_candidate(PathBuf::from("/run/current-system/sw/bin/java"));
+
+    // 5. Runtimes locales descargados
+    for v in [8, 16, 17, 21, 25] {
+        let dir = paths.runtimes_dir.join(format!("java-{}", v));
+        if let Some(bin) = find_java_binary(&dir) {
+            add_candidate(bin);
+        }
+    }
+
+    found
+}
 
 pub async fn resolve_java(
     version: u8,
     paths: &SystemPaths,
     reporter: &dyn ProgressReporter,
-) -> Result<PathBuf> {
+) -> Result<JavaRuntime> {
     // 1. Variable de entorno inyectada por NixOS o el usuario
     let env_var_name = format!("MCSERVER_JAVA_{}_PATH", version);
     if let Ok(env_path) = std::env::var(&env_var_name) {
@@ -75,7 +226,13 @@ pub async fn resolve_java(
             p
         };
         if java_bin.exists() {
-            return Ok(java_bin);
+            reporter.on_info(&format!(
+                "☕ Java {} encontrado en variable {}: {}",
+                version,
+                env_var_name,
+                java_bin.display()
+            ));
+            return Ok(JavaRuntime::Direct(java_bin));
         }
     }
 
@@ -93,14 +250,19 @@ pub async fn resolve_java(
                         p
                     };
                     if java_bin.exists() {
-                        return Ok(java_bin);
+                        reporter.on_info(&format!(
+                            "☕ Java {} encontrado en /etc/set-environment: {}",
+                            version,
+                            java_bin.display()
+                        ));
+                        return Ok(JavaRuntime::Direct(java_bin));
                     }
                 }
             }
         }
     }
 
-    // 1.2 Revisar JAVA_HOME si está definido (ej. inyectado por nix shell o devShell)
+    // 1.2 Revisar JAVA_HOME si está definido
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         let p = PathBuf::from(java_home);
         let java_bin = if p.is_dir() {
@@ -111,7 +273,12 @@ pub async fn resolve_java(
         if java_bin.exists() {
             if let Ok(detected_ver) = query_java_version(&java_bin) {
                 if detected_ver == version {
-                    return Ok(java_bin);
+                    reporter.on_info(&format!(
+                        "☕ Java {} encontrado en JAVA_HOME: {}",
+                        version,
+                        java_bin.display()
+                    ));
+                    return Ok(JavaRuntime::Direct(java_bin));
                 }
             }
         }
@@ -127,37 +294,90 @@ pub async fn resolve_java(
         if candidate.exists() {
             if let Ok(detected_ver) = query_java_version(&candidate) {
                 if detected_ver == version {
-                    return Ok(candidate);
+                    reporter.on_info(&format!(
+                        "☕ Java {} detectado en PATH del sistema: {}",
+                        version,
+                        candidate.display()
+                    ));
+                    return Ok(JavaRuntime::Direct(candidate));
                 }
             }
         }
     }
 
-    // 3. Verificar si ya tenemos el runtime descargado en runtimes_dir (solo si es ejecutable)
+    // 3. Verificar si ya tenemos el runtime descargado en runtimes_dir
     let local_runtime_dir = paths.runtimes_dir.join(format!("java-{}", version));
     if let Some(java_bin) = find_java_binary(&local_runtime_dir) {
         if query_java_version(&java_bin).is_ok() {
-            return Ok(java_bin);
+            reporter.on_info(&format!(
+                "☕ Java {} encontrado en runtimes locales: {}",
+                version,
+                java_bin.display()
+            ));
+            return Ok(JavaRuntime::Direct(java_bin));
         }
     }
 
-    // 4. Si estamos en NixOS y no encontramos Java en Nix, NO intentar descargar binarios ELF genéricos
-    if Path::new("/etc/NIXOS").exists() {
+    // 4. Fallback en NixOS / Entorno Nix:
+    let on_nixos = Path::new("/etc/NIXOS").exists() || is_nix_available();
+    if on_nixos {
+        // 4.1 Si el comando nix está disponible y la versión requerida mapea directamente en nixpkgs
+        if is_nix_available() {
+            if let Some(pkg) = nix_package_for_java(version) {
+                reporter.on_info(&format!(
+                    "☕ Java {} no está en PATH local. Envolviendo dinámicamente con '{}'...",
+                    version, pkg
+                ));
+                return Ok(JavaRuntime::NixShell { package: pkg });
+            }
+        }
+
+        // 4.2 Fallback al JDK local más cercano superior disponible en el sistema (ej. Java 17 para versión 16)
+        let local_javas = find_all_local_javas(paths);
+        let closest_superior = local_javas
+            .into_iter()
+            .filter(|(v, _)| *v >= version)
+            .min_by_key(|(v, _)| *v);
+
+        if let Some((sup_ver, sup_bin)) = closest_superior {
+            reporter.on_info(&format!(
+                "☕ Java {} no disponible directamente. Usando fallback al JDK {} superior local: {}",
+                version, sup_ver, sup_bin.display()
+            ));
+            return Ok(JavaRuntime::Direct(sup_bin));
+        }
+
+        // 4.3 Si no hay JDK local superior y la versión no mapea exactamente en nixpkgs (ej. 16),
+        // envolver dinámicamente con el JDK LTS superior en nixpkgs (ej. nixpkgs#jdk17)
+        if is_nix_available() {
+            let next_pkg = if version <= 17 {
+                "nixpkgs#jdk17".to_string()
+            } else if version <= 21 {
+                "nixpkgs#jdk21".to_string()
+            } else {
+                "nixpkgs#jdk25".to_string()
+            };
+            reporter.on_info(&format!(
+                "☕ Java {} no disponible en nixpkgs. Envolviendo dinámicamente con '{}'...",
+                version, next_pkg
+            ));
+            return Ok(JavaRuntime::NixShell { package: next_pkg });
+        }
+
         bail!(
-            "Java {} no está disponible en NixOS.\n\
-             Configura 'services.mcserman.javaVersions = [ {} ];' en tu configuración de NixOS y ejecuta 'sudo nixos-rebuild switch'.\n\
-             (Si acabas de aplicar la configuración, ejecuta 'source /etc/set-environment' o abre una nueva terminal).",
-            version, version
+            "Java {} no está disponible en NixOS y no se encontró una versión superior en el sistema ni comando 'nix'.\n\
+             Configura 'services.mcserman.javaVersions = [ 8 17 21 25 ];' en tu configuración de NixOS.",
+            version
         );
     }
 
-    // 5. Auto-descarga desde Adoptium API (Eclipse Temurin) para distribuciones estándar (Ubuntu, Debian, Fedora, Arch)
+    // 5. Auto-descarga desde Adoptium API para distribuciones estándar (Ubuntu, Debian, Fedora, Arch)
     reporter.on_info(&format!(
         "☕ Java {} no encontrado. Descargando automáticamente Eclipse Temurin...",
         version
     ));
     let downloaded_bin = download_adoptium_java(version, &local_runtime_dir, reporter).await?;
-    Ok(downloaded_bin)
+    Ok(JavaRuntime::Direct(downloaded_bin))
 }
 
 fn query_java_version(java_cmd: &Path) -> Result<u8> {
@@ -327,24 +547,61 @@ mod tests {
         assert!(flags.contains(&"-XX:+AlwaysPreTouch".to_string()));
     }
 
+    #[test]
+    fn test_nix_package_for_java() {
+        assert_eq!(nix_package_for_java(8), Some("nixpkgs#jdk8".to_string()));
+        assert_eq!(nix_package_for_java(17), Some("nixpkgs#jdk17".to_string()));
+        assert_eq!(nix_package_for_java(21), Some("nixpkgs#jdk21".to_string()));
+        assert_eq!(nix_package_for_java(25), Some("nixpkgs#jdk25".to_string()));
+        assert_eq!(nix_package_for_java(16), None);
+    }
+
+    #[test]
+    fn test_java_runtime_commands() {
+        let rt_direct = JavaRuntime::Direct(PathBuf::from("/usr/bin/java"));
+        assert_eq!(rt_direct.display_cmd(), "/usr/bin/java");
+        assert_eq!(rt_direct.direct_path(), Some(Path::new("/usr/bin/java")));
+
+        let cmd_direct =
+            rt_direct.build_std_command(&["-jar".to_string(), "server.jar".to_string()]);
+        assert_eq!(cmd_direct.get_program(), "/usr/bin/java");
+
+        let rt_nix = JavaRuntime::NixShell {
+            package: "nixpkgs#jdk25".to_string(),
+        };
+        assert_eq!(rt_nix.display_cmd(), "nix shell nixpkgs#jdk25 -c java");
+        assert_eq!(rt_nix.direct_path(), None);
+
+        let cmd_nix = rt_nix.build_std_command(&["-Xmx4G".to_string(), "-jar".to_string()]);
+        assert_eq!(cmd_nix.get_program(), "nix");
+        let args: Vec<&std::ffi::OsStr> = cmd_nix.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("nixpkgs#jdk25")));
+        assert!(args.contains(&std::ffi::OsStr::new("java")));
+        assert!(args.contains(&std::ffi::OsStr::new("-Xmx4G")));
+    }
+
+    #[test]
+    fn test_find_all_local_javas_safe_execution() {
+        let paths = SystemPaths::resolve();
+        // Debe ejecutarse sin pánicos
+        let _ = find_all_local_javas(&paths);
+    }
+
     #[tokio::test]
     #[ignore = "requires pre-installed Java or network access (skipped in NixOS build sandbox)"]
     async fn test_resolve_java_21() {
         let paths = SystemPaths::resolve();
-        let java_path =
+        let java_runtime =
             resolve_java(21, &paths, &crate::core::progress::SilentProgressReporter).await;
-        if Path::new("/etc/NIXOS").exists() {
-            if let Err(ref e) = java_path {
-                assert!(e.to_string().contains("NixOS"));
-                return;
-            }
-        }
         assert!(
-            java_path.is_ok(),
+            java_runtime.is_ok(),
             "Failed to resolve Java 21: {:?}",
-            java_path.err()
+            java_runtime.err()
         );
-        let bin = java_path.unwrap();
-        assert!(bin.exists());
+        let rt = java_runtime.unwrap();
+        match rt {
+            JavaRuntime::Direct(bin) => assert!(bin.exists()),
+            JavaRuntime::NixShell { package } => assert!(package.contains("21")),
+        }
     }
 }

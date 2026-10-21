@@ -62,6 +62,9 @@ pub async fn run(paths: &SystemPaths) -> Result<()> {
         Terminal::new(backend).context("Fallo al inicializar terminal de Ratatui")?;
 
     let mut app = App::new(paths.clone());
+    if let Ok(size) = terminal.size() {
+        app.terminal_size = (size.width, size.height);
+    }
     app.refresh_online_status().await;
 
     let mut event_handler = EventHandler::new(256);
@@ -90,13 +93,19 @@ pub async fn run(paths: &SystemPaths) -> Result<()> {
                     app.update(action::Action::Resize(w, h), &event_tx);
                 }
                 AppEvent::Tick => {
+                    app.check_status_expiration();
                     tick_counter = tick_counter.wrapping_add(1);
-                    // Actualizar estado de los sockets cada 10 ticks (1 segundo)
-                    if tick_counter.is_multiple_of(10) {
+                    // Actualizar estado de las instancias cada 5 ticks (500 ms)
+                    if tick_counter.is_multiple_of(5) {
                         app.refresh_online_status().await;
                     }
                 }
                 AppEvent::LogLineReceived { instance, line } => {
+                    if let Some(inst) = app.instances.iter_mut().find(|i| i.name == instance) {
+                        if inst.state == app::ServerState::Offline {
+                            inst.state = app::ServerState::Starting;
+                        }
+                    }
                     if let Some(selected) = app.selected() {
                         if selected.name == instance {
                             app.push_log_line(line);
@@ -146,9 +155,9 @@ pub async fn run(paths: &SystemPaths) -> Result<()> {
                         app.set_status(&format!("✗ {}", err));
                     }
                 },
-                AppEvent::InstanceStatusChanged { name, is_online } => {
+                AppEvent::InstanceStatusChanged { name, state } => {
                     if let Some(inst) = app.instances.iter_mut().find(|i| i.name == name) {
-                        inst.is_online = is_online;
+                        inst.state = state;
                     }
                 }
                 AppEvent::ModrinthSearchResults(hits) => {
@@ -170,9 +179,16 @@ pub async fn run(paths: &SystemPaths) -> Result<()> {
                     ));
                 }
                 AppEvent::VersionsLoaded(vers) => {
+                    let default_idx = vers
+                        .iter()
+                        .position(|v| {
+                            v.starts_with("1.")
+                                && v[2..].chars().all(|c| c.is_ascii_digit() || c == '.')
+                        })
+                        .unwrap_or(0);
                     app.create_versions = vers;
                     app.create_loading_versions = false;
-                    app.create_version_idx = 0;
+                    app.create_version_idx = default_idx;
                 }
                 AppEvent::VersionsLoadError(err) => {
                     app.create_error = Some(format!("Error cargando versiones: {}", err));
@@ -366,5 +382,242 @@ mod tests {
             content.contains("Crear Nueva Instancia"),
             "El modal debe ser visible en el buffer"
         );
+    }
+
+    #[test]
+    fn test_parse_minecraft_formatting() {
+        use ratatui::style::Color;
+
+        let raw = "§cRojo §aVerde §lNegrita";
+        let spans = views::properties::parse_minecraft_formatting(raw);
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "Rojo ");
+        assert_eq!(spans[0].style.fg, Some(Color::LightRed));
+
+        assert_eq!(spans[1].content, "Verde ");
+        assert_eq!(spans[1].style.fg, Some(Color::LightGreen));
+
+        assert_eq!(spans[2].content, "Negrita");
+        assert!(spans[2]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_format_downloads() {
+        assert_eq!(crate::modrinth::api::format_downloads(500), "500");
+        assert_eq!(crate::modrinth::api::format_downloads(1_500), "1.5K");
+        assert_eq!(crate::modrinth::api::format_downloads(1_200_000), "1.2M");
+    }
+
+    #[test]
+    fn test_modal_esc_disambiguation() {
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+
+        // Abrir modal de creación (inicia en Insert)
+        app.show_create_modal = true;
+        app.input_mode = InputMode::Insert;
+
+        let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        // Primer Esc: debe salir de Insert a Normal SIN cerrar el modal
+        let act1 = app.handle_key(key_esc);
+        assert_eq!(act1, None);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.show_create_modal);
+
+        // Segundo Esc: ahora en Normal, debe cerrar el modal
+        let act2 = app.handle_key(key_esc);
+        assert_eq!(act2, Some(action::Action::CloseCreateModal));
+    }
+
+    #[test]
+    fn test_focus_switching() {
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+
+        // Dashboard inicia con foco en Sidebar
+        app.active_tab = app::AppTab::Dashboard;
+        app.focus = app::Focus::Sidebar;
+
+        // 'l' / Right pasa foco al panel principal
+        let key_right = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        let act = app.handle_key(key_right);
+        assert_eq!(act, Some(action::Action::FocusMainPanel));
+        app.update(act.unwrap(), &tokio::sync::mpsc::channel(1).0);
+        assert_eq!(app.focus, app::Focus::MainPanel);
+
+        // 'h' / Left regresa foco a la sidebar
+        let key_left = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        let act = app.handle_key(key_left);
+        assert_eq!(act, Some(action::Action::FocusSidebar));
+        app.update(act.unwrap(), &tokio::sync::mpsc::channel(1).0);
+        assert_eq!(app.focus, app::Focus::Sidebar);
+    }
+
+    #[test]
+    fn test_console_visual_lines_and_clamping() {
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+        app.terminal_size = (80, 24);
+        let (tx, _) = tokio::sync::mpsc::channel(16);
+
+        // Sin logs: total visual lines es 0, max_scroll es 0
+        assert_eq!(app.console_total_visual_lines(), 0);
+        assert_eq!(app.console_max_scroll(), 0);
+
+        // Intentar scrollear arriba sin logs no debe incrementar console_scroll
+        app.update(action::Action::ScrollLogUp(15), &tx);
+        assert_eq!(app.console_scroll, 0);
+
+        // inner_width = 80 - 26 (sidebar) - 2 (border) = 52
+        // Agregar líneas cortas
+        for i in 0..10 {
+            app.push_log_line(format!("Línea corta {}", i));
+        }
+        // 10 líneas cortas <= viewport_height (12), max_scroll debe ser 0
+        assert_eq!(app.console_total_visual_lines(), 10);
+        assert_eq!(app.console_max_scroll(), 0);
+        app.update(action::Action::ScrollLogUp(5), &tx);
+        assert_eq!(app.console_scroll, 0);
+
+        // Agregar 30 líneas más para superar viewport_height
+        for i in 10..40 {
+            app.push_log_line(format!("Línea de log estándar número {}", i));
+        }
+        let total = app.console_total_visual_lines();
+        assert_eq!(total, 40);
+        let max_scroll = app.console_max_scroll();
+        assert!(max_scroll > 0);
+
+        // Scrollear hacia arriba: debe saturar en max_scroll, nunca superarlo
+        app.update(action::Action::ScrollLogUp(9999), &tx);
+        assert_eq!(app.console_scroll, max_scroll);
+        assert!(!app.auto_scroll);
+
+        // Scrollear hacia abajo parcialmente
+        app.update(action::Action::ScrollLogDown(5), &tx);
+        assert_eq!(app.console_scroll, max_scroll - 5);
+        assert!(!app.auto_scroll);
+
+        // Scrollear al final (ScrollLogBottom)
+        app.update(action::Action::ScrollLogBottom, &tx);
+        assert_eq!(app.console_scroll, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn test_console_render_scroll_and_scrollbar() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+        app.active_tab = app::AppTab::Console;
+        app.focus = app::Focus::MainPanel;
+
+        for i in 0..50 {
+            app.push_log_line(format!("Log message {:03} with some extra padding text to test wrapping behavior across multiple columns", i));
+        }
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Render al final (auto_scroll = true)
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+
+        // Scrollear hacia arriba y renderizar de nuevo con scrollbar
+        app.console_scroll = 20;
+        app.auto_scroll = false;
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sidebar_server_state_and_log_trigger() {
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+        app.instances.clear();
+        app.instances.push(app::InstanceSummary {
+            name: "test_srv".to_string(),
+            loader: "paper".to_string(),
+            mc_version: "1.21".to_string(),
+            ram: "4G".to_string(),
+            port: 25565,
+            state: app::ServerState::Offline,
+        });
+        app.selected_instance = 0;
+
+        // Si la instancia recibe logs en vivo, no puede estar Offline -> debe pasar a Starting
+        if let Some(inst) = app.instances.iter_mut().find(|i| i.name == "test_srv") {
+            if inst.state == app::ServerState::Offline {
+                inst.state = app::ServerState::Starting;
+            }
+        }
+        assert_eq!(app.instances[0].state, app::ServerState::Starting);
+
+        // Toggle server reactivo inmediato en memoria
+        let (tx, _) = tokio::sync::mpsc::channel(16);
+        app.instances[0].state = app::ServerState::Offline;
+        app.execute_toggle_server(&tx);
+        assert_eq!(app.instances[0].state, app::ServerState::Starting);
+    }
+
+    #[tokio::test]
+    async fn test_status_message_ttl_and_navigation_clearing() {
+        let paths = SystemPaths::resolve();
+        let mut app = App::new(paths);
+        let (tx, _) = tokio::sync::mpsc::channel(16);
+
+        // 1. Asignar mensaje de estado
+        app.set_status("Servidor 'test' ONLINE.");
+        assert!(app.status_message.is_some());
+
+        // Comprobación inmediata no debe expirar
+        app.check_status_expiration();
+        assert!(app.status_message.is_some());
+
+        // 2. Simular expiración por tiempo (> 3s)
+        app.status_message = Some((
+            "Servidor 'test' ONLINE.".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(4),
+        ));
+        app.check_status_expiration();
+        assert!(app.status_message.is_none());
+
+        // 3. Limpieza inmediata al navegar entre pestañas
+        app.set_status("Mensaje temporal");
+        assert!(app.status_message.is_some());
+        app.update(action::Action::NextTab, &tx);
+        assert!(app.status_message.is_none());
+
+        app.set_status("Mensaje temporal 2");
+        app.update(action::Action::GoToTab(0), &tx);
+        assert!(app.status_message.is_none());
+
+        // 4. Limpieza al cambiar foco
+        app.set_status("Mensaje temporal 3");
+        app.update(action::Action::FocusMainPanel, &tx);
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_log_line_carriage_return_and_jline_erase() {
+        // Test de reescritura por retorno de carro \r (progreso)
+        let progress = "Downloading Paper 10%\rDownloading Paper 100%\r\n";
+        let clean_prog = app::sanitize_log_line(progress);
+        assert_eq!(clean_prog, "Downloading Paper 100%\n");
+
+        // Test de secuencias de borrado de línea JLine/Paper (\r\x1b[2K)
+        let jline = "\r\x1b[2K[12:00:00 INFO]: Servidor ONLINE\r\n";
+        let clean_jline = app::sanitize_log_line(jline);
+        assert_eq!(clean_jline, "[12:00:00 INFO]: Servidor ONLINE\n");
+
+        // Test de \x1b[K (borrado hacia adelante)
+        let forward_erase = "Long line from before that was longer\r\x1b[KShort line";
+        let clean_erase = app::sanitize_log_line(forward_erase);
+        assert_eq!(clean_erase, "Short line");
     }
 }

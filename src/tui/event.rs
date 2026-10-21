@@ -1,4 +1,5 @@
 use crate::core::progress::ProgressUpdate;
+use crate::tui::app::ServerState;
 use crossterm::event::{Event as CrosstermEvent, KeyEvent};
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -11,7 +12,7 @@ pub enum AppEvent {
     Resize(u16, u16),
     Tick,
     Progress(ProgressUpdate),
-    InstanceStatusChanged { name: String, is_online: bool },
+    InstanceStatusChanged { name: String, state: ServerState },
     LogLineReceived { instance: String, line: String },
     ModrinthSearchResults(Vec<crate::modrinth::api::SearchHit>),
     ModrinthSearchError(String),

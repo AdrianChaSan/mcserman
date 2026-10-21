@@ -44,7 +44,7 @@ in
 
     javaVersions = mkOption {
       type = types.listOf (types.enum [ 8 17 21 25 ]);
-      default = [ 21 ];
+      default = [ 8 17 21 25 ];
       description = "Versiones del JDK Eclipse Temurin a preinstalar desde el Nix Store.";
     };
 

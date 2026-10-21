@@ -1,7 +1,11 @@
-use crate::tui::app::{App, InputMode};
+use crate::modrinth::api::format_downloads;
+use crate::tui::app::{App, Focus, InputMode};
 use crate::tui::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Gauge, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inst = match app.selected() {
@@ -22,7 +26,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if inst.loader == "vanilla" {
         let text = vec![
             Line::from(""),
-            Line::from(Span::styled("  ⚠️  Instancia oficial Vanilla seleccionada", theme.warning)),
+            Line::from(Span::styled(
+                "  ⚠️  Instancia oficial Vanilla seleccionada",
+                theme.warning,
+            )),
             Line::from(""),
             Line::from(Span::styled(
                 "  Los servidores Vanilla de Mojang no admiten mods ni plugins de terceros.",
@@ -43,25 +50,45 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Input de búsqueda
-            Constraint::Min(0),    // Lista de resultados
-            Constraint::Length(3), // Barra de descarga o estado
-        ])
-        .split(area);
+    if let Some((progress, ref msg)) = app.modrinth_progress {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Input de búsqueda
+                Constraint::Min(0),    // Lista de resultados
+                Constraint::Length(3), // Barra de descarga
+            ])
+            .split(area);
 
-    draw_search_bar(
-        f,
-        chunks[0],
-        app,
-        inst.loader.as_str(),
-        &inst.mc_version,
-        theme,
-    );
-    draw_results_list(f, chunks[1], app, theme);
-    draw_status_bar(f, chunks[2], app, theme);
+        draw_search_bar(
+            f,
+            chunks[0],
+            app,
+            inst.loader.as_str(),
+            &inst.mc_version,
+            theme,
+        );
+        draw_results_list(f, chunks[1], app, theme);
+        draw_progress_bar(f, chunks[2], progress, msg, theme);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Input de búsqueda
+                Constraint::Min(0),    // Lista de resultados expandida
+            ])
+            .split(area);
+
+        draw_search_bar(
+            f,
+            chunks[0],
+            app,
+            inst.loader.as_str(),
+            &inst.mc_version,
+            theme,
+        );
+        draw_results_list(f, chunks[1], app, theme);
+    }
 }
 
 fn draw_search_bar(
@@ -73,7 +100,8 @@ fn draw_search_bar(
     theme: &Theme,
 ) {
     let is_insert = app.input_mode == InputMode::Insert;
-    let border_style = if is_insert {
+    let is_main_focused = app.focus == Focus::MainPanel;
+    let border_style = if is_insert || is_main_focused {
         theme.active_border
     } else {
         theme.border
@@ -103,10 +131,27 @@ fn draw_search_bar(
 }
 
 fn draw_results_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let is_main_focused = app.focus == Focus::MainPanel;
+    let border_style = if is_main_focused {
+        theme.active_border
+    } else {
+        theme.border
+    };
+
+    let title = if app.modrinth_hits.is_empty() {
+        " Resultados ".to_string()
+    } else {
+        format!(
+            " Resultados ({}/{}) ",
+            app.selected_mod_hit + 1,
+            app.modrinth_hits.len()
+        )
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.border)
-        .title(" Resultados ");
+        .border_style(border_style)
+        .title(title);
 
     if app.modrinth_loading {
         let p = Paragraph::new(" Consultando Modrinth API...")
@@ -132,18 +177,24 @@ fn draw_results_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
+    let max_desc_width = (area.width.saturating_sub(6)) as usize;
+
     let items: Vec<ListItem> = app
         .modrinth_hits
         .iter()
         .enumerate()
         .map(|(i, hit)| {
             let is_selected = i == app.selected_mod_hit;
-            let pointer = if is_selected { "▸ " } else { "  " };
+            let pointer = if is_selected && is_main_focused {
+                "▸ "
+            } else {
+                "  "
+            };
 
-            let header = Line::from(vec![
+            let mut header_spans = vec![
                 Span::styled(
                     pointer,
-                    if is_selected {
+                    if is_selected && is_main_focused {
                         theme.accent
                     } else {
                         theme.muted
@@ -152,17 +203,47 @@ fn draw_results_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 Span::styled(
                     &hit.title,
                     if is_selected {
-                        theme.highlight
+                        if is_main_focused {
+                            theme.highlight
+                        } else {
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
+                        }
                     } else {
                         theme.bold
                     },
                 ),
-                Span::styled(format!(" ({})", hit.slug), theme.muted),
-            ]);
+            ];
+
+            if let Some(ref author) = hit.author {
+                header_spans.push(Span::styled(format!(" por {}", author), theme.muted));
+            }
+
+            if let Some(dl) = hit.downloads {
+                header_spans.push(Span::styled(
+                    format!("  ⬇ {}", format_downloads(dl)),
+                    theme.accent,
+                ));
+            }
+
+            let header = Line::from(header_spans);
+
+            let desc_str = if hit.description.chars().count() > max_desc_width {
+                let mut truncated: String = hit
+                    .description
+                    .chars()
+                    .take(max_desc_width.saturating_sub(3))
+                    .collect();
+                truncated.push_str("...");
+                truncated
+            } else {
+                hit.description.clone()
+            };
 
             let desc = Line::from(vec![
                 Span::styled("    ", theme.muted),
-                Span::styled(&hit.description, theme.muted),
+                Span::styled(desc_str, theme.muted),
             ]);
 
             ListItem::new(vec![header, desc])
@@ -171,35 +252,31 @@ fn draw_results_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let list = List::new(items).block(block);
     f.render_widget(list, area);
+
+    // Scrollbar en el margen derecho de resultados
+    if !app.modrinth_hits.is_empty() {
+        let mut scrollbar_state =
+            ScrollbarState::new(app.modrinth_hits.len()).position(app.selected_mod_hit);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
 }
 
-fn draw_status_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    if let Some((progress, ref msg)) = app.modrinth_progress {
-        let ratio = (progress / 100.0).clamp(0.0, 1.0);
-        let gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme.accent),
-            )
-            .gauge_style(theme.highlight)
-            .ratio(ratio)
-            .label(msg.as_str());
-        f.render_widget(gauge, area);
-    } else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.border);
-        let hints = Line::from(vec![
-            Span::styled(" Atajos: ", theme.muted),
-            Span::styled("[i/Enter] ", theme.accent),
-            Span::styled("Escribir búsqueda   ", theme.base),
-            Span::styled("[j/k] ", theme.accent),
-            Span::styled("Navegar resultados   ", theme.base),
-            Span::styled("[Enter en Normal] ", theme.accent),
-            Span::styled("Descargar e Instalar", theme.base),
-        ]);
-        let p = Paragraph::new(hints).block(block);
-        f.render_widget(p, area);
-    }
+fn draw_progress_bar(f: &mut Frame, area: Rect, progress: f64, msg: &str, theme: &Theme) {
+    let ratio = (progress / 100.0).clamp(0.0, 1.0);
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.accent)
+                .title(" Descarga de Mod/Plugin "),
+        )
+        .gauge_style(theme.highlight)
+        .ratio(ratio)
+        .label(msg);
+    f.render_widget(gauge, area);
 }

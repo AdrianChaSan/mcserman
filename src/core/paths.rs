@@ -91,6 +91,10 @@ impl SystemPaths {
         self.socket_dir.join(format!("{}.sock", name))
     }
 
+    pub fn pid_file(&self, name: &str) -> PathBuf {
+        self.socket_dir.join(format!("{}.pid", name))
+    }
+
     pub fn logs_file(&self, name: &str) -> PathBuf {
         self.instance_dir(name).join("logs").join("latest.log")
     }

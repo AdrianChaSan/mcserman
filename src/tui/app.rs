@@ -7,7 +7,7 @@ use tui_input::Input;
 use crate::core::config::{InstanceConfig, LoaderType};
 use crate::core::paths::SystemPaths;
 use crate::core::properties::ServerProperties;
-use crate::daemon::socket::is_daemon_running;
+use crate::daemon::socket::{is_daemon_running, send_request, SocketRequest, SocketResponse};
 use crate::modrinth::api::SearchHit;
 use crate::tui::action::Action;
 
@@ -45,6 +45,20 @@ impl AppTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Online,
+    Offline,
+    Starting,
+    Stopping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Sidebar,
+    MainPanel,
+}
+
 #[derive(Debug, Clone)]
 pub struct InstanceSummary {
     pub name: String,
@@ -52,20 +66,68 @@ pub struct InstanceSummary {
     pub mc_version: String,
     pub ram: String,
     pub port: u16,
-    pub is_online: bool,
+    pub state: ServerState,
 }
 
 /// Sanitiza líneas crudas de consola eliminando secuencias ANSI de control,
-/// convirtiendo tabs en espacios y quitando retornos de carro.
+/// convirtiendo tabs en espacios y resolviendo reescrituras por retorno de carro (\r).
 pub fn sanitize_log_line(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut in_escape = false;
-    for c in raw.chars() {
+    let has_trailing_newline = raw.ends_with('\n');
+    let mut s = raw;
+    if let Some(stripped) = s.strip_suffix("\r\n") {
+        s = stripped;
+    } else if let Some(stripped) = s.strip_suffix('\n') {
+        s = stripped;
+    }
+    s = s.trim_end_matches('\r');
+
+    // Si la línea contiene \r en medio (reescrituras de JLine/Paper o barras de progreso),
+    // la última parte no vacía representa el texto final sobreescrito en pantalla.
+    let text_to_process = if s.contains('\r') {
+        s.split('\r').filter(|part| !part.is_empty()).last().unwrap_or("")
+    } else {
+        s
+    };
+
+    let mut out = String::with_capacity(text_to_process.len());
+    let mut chars = text_to_process.chars().peekable();
+
+    while let Some(c) = chars.next() {
         if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c.is_ascii_alphabetic() || c == 'm' || c == 'K' || c == 'H' || c == 'J' {
-                in_escape = false;
+            match chars.peek() {
+                Some('[') => {
+                    // Secuencia CSI: \x1b[ ... byte final de comando (0x40..=0x7E)
+                    chars.next(); // consumir '['
+                    while let Some(&next_c) = chars.peek() {
+                        chars.next();
+                        let b = next_c as u32;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // Secuencia OSC: \x1b] ... \x07 o \x1b\
+                    chars.next(); // consumir ']'
+                    while let Some(next_c) = chars.next() {
+                        if next_c == '\x07' {
+                            break;
+                        }
+                        if next_c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('(') | Some(')') => {
+                    chars.next(); // consumir '(' o ')'
+                    chars.next(); // consumir byte charset
+                }
+                Some(_) => {
+                    // Secuencia de escape de 2 bytes: \x1b seguido de 1 caracter
+                    chars.next();
+                }
+                None => {}
             }
         } else if c == '\t' {
             out.push_str("    ");
@@ -73,13 +135,74 @@ pub fn sanitize_log_line(raw: &str) -> String {
             out.push(c);
         }
     }
+
+    if has_trailing_newline {
+        out.push('\n');
+    }
+
     out
+}
+
+#[cfg(unix)]
+pub fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn is_pid_alive(_pid: u32) -> bool {
+    false
+}
+
+pub async fn query_instance_state(paths: &SystemPaths, name: &str) -> ServerState {
+    let sock = paths.socket_path(name);
+    let pid_file = paths.pid_file(name);
+
+    if sock.exists() {
+        if let Ok(SocketResponse::Ok(status)) = send_request(&sock, &SocketRequest::Status).await {
+            if status.contains("Starting") {
+                return ServerState::Starting;
+            } else {
+                return ServerState::Online;
+            }
+        }
+        if is_daemon_running(&sock).await {
+            return ServerState::Online;
+        }
+    }
+
+    if pid_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&pid_file) {
+            let mut any_alive = false;
+            for line in content.lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    if is_pid_alive(pid) {
+                        any_alive = true;
+                        break;
+                    }
+                }
+            }
+            if any_alive {
+                return ServerState::Starting;
+            } else {
+                let _ = std::fs::remove_file(&pid_file);
+                if sock.exists() {
+                    let _ = std::fs::remove_file(&sock);
+                }
+            }
+        }
+    }
+
+    ServerState::Offline
 }
 
 pub struct App {
     pub should_quit: bool,
     pub input_mode: InputMode,
     pub active_tab: AppTab,
+    pub focus: Focus,
     pub instances: Vec<InstanceSummary>,
     pub selected_instance: usize,
     pub paths: SystemPaths,
@@ -105,6 +228,7 @@ pub struct App {
     pub properties_list: Vec<(String, String)>,
     pub selected_property: usize,
     pub properties_dirty: bool,
+    pub editing_property: Option<Input>,
 
     // Modal de Creación
     pub show_create_modal: bool,
@@ -126,6 +250,7 @@ impl App {
             should_quit: false,
             input_mode: InputMode::Normal,
             active_tab: AppTab::Dashboard,
+            focus: Focus::Sidebar,
             instances: Vec::new(),
             selected_instance: 0,
             paths,
@@ -151,6 +276,7 @@ impl App {
             properties_list: Vec::new(),
             selected_property: 0,
             properties_dirty: false,
+            editing_property: None,
 
             // Modal de Creación
             show_create_modal: false,
@@ -177,13 +303,20 @@ impl App {
                 if entry.path().is_dir() {
                     let cfg_path = entry.path().join("instance.toml");
                     if let Ok(cfg) = InstanceConfig::load(&cfg_path) {
+                        let existing_state = self
+                            .instances
+                            .iter()
+                            .find(|i| i.name == cfg.name)
+                            .map(|i| i.state)
+                            .unwrap_or(ServerState::Offline);
+
                         list.push(InstanceSummary {
                             name: cfg.name,
                             loader: cfg.loader.to_string(),
                             mc_version: cfg.mc_version,
                             ram: cfg.ram_max,
                             port: cfg.port,
-                            is_online: false,
+                            state: existing_state,
                         });
                     }
                 }
@@ -198,9 +331,57 @@ impl App {
 
     pub async fn refresh_online_status(&mut self) {
         for inst in &mut self.instances {
-            let sock = self.paths.socket_path(&inst.name);
-            inst.is_online = is_daemon_running(&sock).await;
+            let detected = query_instance_state(&self.paths, &inst.name).await;
+            match inst.state {
+                ServerState::Starting => {
+                    if detected == ServerState::Online {
+                        inst.state = ServerState::Online;
+                    } else if detected == ServerState::Offline {
+                        inst.state = ServerState::Offline;
+                    }
+                }
+                ServerState::Stopping => {
+                    if detected == ServerState::Offline {
+                        inst.state = ServerState::Offline;
+                    }
+                }
+                _ => {
+                    inst.state = detected;
+                }
+            }
         }
+    }
+
+    pub fn console_viewport_dims(&self) -> (usize, usize) {
+        let (w, h) = self.terminal_size;
+        let main_width = (w as usize).saturating_sub(crate::tui::theme::SIDEBAR_WIDTH as usize);
+        let inner_width = main_width.saturating_sub(2);
+        let logs_height = (h as usize).saturating_sub(3 + 1 + 3 + 3);
+        let viewport_height = logs_height.saturating_sub(2);
+        (inner_width, viewport_height)
+    }
+
+    pub fn console_total_visual_lines(&self) -> usize {
+        let (inner_width, _) = self.console_viewport_dims();
+        if inner_width == 0 {
+            return 0;
+        }
+        self.log_buffer
+            .iter()
+            .map(|raw| {
+                let len = raw.chars().count();
+                (len.max(1) + inner_width - 1) / inner_width
+            })
+            .sum()
+    }
+
+    pub fn console_max_scroll(&self) -> usize {
+        let (inner_width, viewport_height) = self.console_viewport_dims();
+        if inner_width == 0 || viewport_height == 0 {
+            return 0;
+        }
+        let total = self.console_total_visual_lines();
+        total.saturating_sub(viewport_height)
     }
 
     pub fn selected(&self) -> Option<&InstanceSummary> {
@@ -211,12 +392,28 @@ impl App {
         self.status_message = Some((msg.to_string(), Instant::now()));
     }
 
+    pub fn check_status_expiration(&mut self) {
+        if let Some((_, instant)) = self.status_message {
+            if instant.elapsed() > std::time::Duration::from_secs(3) {
+                self.status_message = None;
+            }
+        }
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+
     pub fn push_log_line(&mut self, line: String) {
         let clean = sanitize_log_line(&line);
+        let trimmed = clean.trim_end();
+        if trimmed.is_empty() && !line.trim().is_empty() {
+            return;
+        }
         if self.log_buffer.len() >= MAX_LOG_LINES {
             self.log_buffer.pop_front();
         }
-        self.log_buffer.push_back(clean);
+        self.log_buffer.push_back(trimmed.to_string());
         if self.auto_scroll {
             self.console_scroll = 0;
         }
@@ -363,37 +560,60 @@ impl App {
         self.set_status("✓ server.properties guardado con éxito");
         Ok(())
     }
+}
 
+pub fn is_boolean_property(k: &str, v: &str) -> bool {
+    v == "true"
+        || v == "false"
+        || matches!(
+            k,
+            "online-mode"
+                | "pvp"
+                | "white-list"
+                | "allow-flight"
+                | "enable-command-block"
+                | "spawn-animals"
+                | "spawn-monsters"
+                | "spawn-npcs"
+                | "generate-structures"
+                | "hardcore"
+                | "snooper-enabled"
+                | "enable-rcon"
+                | "enable-query"
+                | "enforce-whitelist"
+        )
+}
+
+pub fn is_enum_property(k: &str) -> bool {
+    matches!(k, "difficulty" | "gamemode")
+}
+
+impl App {
     pub fn toggle_selected_property(&mut self) {
         if let Some((k, v)) = self.properties_list.get_mut(self.selected_property) {
-            match k.as_str() {
-                "online-mode" | "pvp" | "white-list" | "allow-flight" => {
-                    *v = if v == "true" {
-                        "false".to_string()
-                    } else {
-                        "true".to_string()
-                    };
-                    self.properties_dirty = true;
-                }
-                "difficulty" => {
-                    *v = match v.as_str() {
-                        "peaceful" => "easy".to_string(),
-                        "easy" => "normal".to_string(),
-                        "normal" => "hard".to_string(),
-                        _ => "peaceful".to_string(),
-                    };
-                    self.properties_dirty = true;
-                }
-                "gamemode" => {
-                    *v = match v.as_str() {
-                        "survival" => "creative".to_string(),
-                        "creative" => "adventure".to_string(),
-                        "adventure" => "spectator".to_string(),
-                        _ => "survival".to_string(),
-                    };
-                    self.properties_dirty = true;
-                }
-                _ => {}
+            if is_boolean_property(k, v) {
+                *v = if v == "true" {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                };
+                self.properties_dirty = true;
+            } else if k == "difficulty" {
+                *v = match v.as_str() {
+                    "peaceful" => "easy".to_string(),
+                    "easy" => "normal".to_string(),
+                    "normal" => "hard".to_string(),
+                    _ => "peaceful".to_string(),
+                };
+                self.properties_dirty = true;
+            } else if k == "gamemode" {
+                *v = match v.as_str() {
+                    "survival" => "creative".to_string(),
+                    "creative" => "adventure".to_string(),
+                    "adventure" => "spectator".to_string(),
+                    _ => "survival".to_string(),
+                };
+                self.properties_dirty = true;
             }
         }
     }
@@ -402,90 +622,161 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         // Si el modal de creación está abierto
         if self.show_create_modal {
-            match (key.modifiers, key.code) {
-                (KeyModifiers::NONE, KeyCode::Esc) => {
-                    return Some(Action::CloseCreateModal);
-                }
-                (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Down) => {
-                    return Some(Action::NextWizardField);
-                }
-                (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::Up) => {
-                    return Some(Action::PrevWizardField);
-                }
-                (KeyModifiers::NONE, KeyCode::Enter) => {
-                    return Some(Action::SubmitCreateInstance);
-                }
-                _ => {
-                    // Si el foco está en el selector de Loader
-                    if self.create_field_idx == 1 {
-                        match key.code {
-                            KeyCode::Left => {
-                                let prev = if self.create_loader_idx == 0 {
-                                    2
-                                } else {
-                                    self.create_loader_idx - 1
-                                };
-                                return Some(Action::SelectWizardLoader(prev));
+            if self.input_mode == InputMode::Insert {
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::NONE, KeyCode::Esc) => {
+                        self.input_mode = InputMode::Normal;
+                        return None;
+                    }
+                    (KeyModifiers::NONE, KeyCode::Enter) => {
+                        self.input_mode = InputMode::Normal;
+                        return None;
+                    }
+                    (KeyModifiers::NONE, KeyCode::Tab) => {
+                        self.create_field_idx = (self.create_field_idx + 1) % 5;
+                        return None;
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                        self.create_field_idx = if self.create_field_idx == 0 {
+                            4
+                        } else {
+                            self.create_field_idx - 1
+                        };
+                        return None;
+                    }
+                    _ => {
+                        match self.create_field_idx {
+                            0 => {
+                                self.create_name_input
+                                    .handle_event(&crossterm::event::Event::Key(key));
                             }
-                            KeyCode::Right => {
-                                let next = (self.create_loader_idx + 1) % 3;
-                                return Some(Action::SelectWizardLoader(next));
+                            3 => {
+                                self.create_ram_input
+                                    .handle_event(&crossterm::event::Event::Key(key));
+                            }
+                            4 => {
+                                self.create_port_input
+                                    .handle_event(&crossterm::event::Event::Key(key));
                             }
                             _ => {}
                         }
+                        return None;
                     }
-                    // Si el foco está en el selector de Versión
-                    if self.create_field_idx == 2 {
-                        match key.code {
-                            KeyCode::Left => {
-                                if !self.create_versions.is_empty() && self.create_version_idx > 0 {
-                                    self.create_version_idx -= 1;
+                }
+            } else {
+                // Modo Normal dentro del modal
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::NONE, KeyCode::Esc) => {
+                        return Some(Action::CloseCreateModal);
+                    }
+                    (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Down) => {
+                        return Some(Action::NextWizardField);
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::BackTab) | (KeyModifiers::NONE, KeyCode::Up) => {
+                        return Some(Action::PrevWizardField);
+                    }
+                    (KeyModifiers::NONE, KeyCode::Enter) => {
+                        return Some(Action::SubmitCreateInstance);
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('i')) => {
+                        if matches!(self.create_field_idx, 0 | 3 | 4) {
+                            self.input_mode = InputMode::Insert;
+                        }
+                        return None;
+                    }
+                    _ => {
+                        if self.create_field_idx == 1 {
+                            match key.code {
+                                KeyCode::Left => {
+                                    let prev = if self.create_loader_idx == 0 {
+                                        2
+                                    } else {
+                                        self.create_loader_idx - 1
+                                    };
+                                    return Some(Action::SelectWizardLoader(prev));
                                 }
-                                return None;
-                            }
-                            KeyCode::Right => {
-                                if !self.create_versions.is_empty()
-                                    && self.create_version_idx + 1 < self.create_versions.len()
-                                {
-                                    self.create_version_idx += 1;
+                                KeyCode::Right => {
+                                    let next = (self.create_loader_idx + 1) % 3;
+                                    return Some(Action::SelectWizardLoader(next));
                                 }
-                                return None;
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        if self.create_field_idx == 2 {
+                            match key.code {
+                                KeyCode::Left => {
+                                    if !self.create_versions.is_empty()
+                                        && self.create_version_idx > 0
+                                    {
+                                        self.create_version_idx -= 1;
+                                    }
+                                    return None;
+                                }
+                                KeyCode::Right => {
+                                    if !self.create_versions.is_empty()
+                                        && self.create_version_idx + 1 < self.create_versions.len()
+                                    {
+                                        self.create_version_idx += 1;
+                                    }
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if matches!(self.create_field_idx, 0 | 3 | 4) {
+                            if let KeyCode::Char(_) = key.code {
+                                self.input_mode = InputMode::Insert;
+                                match self.create_field_idx {
+                                    0 => {
+                                        self.create_name_input
+                                            .handle_event(&crossterm::event::Event::Key(key));
+                                    }
+                                    3 => {
+                                        self.create_ram_input
+                                            .handle_event(&crossterm::event::Event::Key(key));
+                                    }
+                                    4 => {
+                                        self.create_port_input
+                                            .handle_event(&crossterm::event::Event::Key(key));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        return None;
                     }
-
-                    // Pasar al input activo correspondiente
-                    match self.create_field_idx {
-                        0 => {
-                            self.create_name_input
-                                .handle_event(&crossterm::event::Event::Key(key));
-                        }
-                        3 => {
-                            self.create_ram_input
-                                .handle_event(&crossterm::event::Event::Key(key));
-                        }
-                        4 => {
-                            self.create_port_input
-                                .handle_event(&crossterm::event::Event::Key(key));
-                        }
-                        _ => {}
-                    }
-                    return None;
                 }
             }
         }
 
-        // MODO INSERT (Rule 1): Escribiendo en consola o Modrinth. Atajos globales DESACTIVADOS.
+        // MODO INSERT: Escribiendo en consola, Modrinth o editando propiedad
         if self.input_mode == InputMode::Insert {
             match (key.modifiers, key.code) {
                 (KeyModifiers::NONE, KeyCode::Esc) => {
+                    if self.editing_property.is_some() {
+                        return Some(Action::CancelEditProperty);
+                    }
                     self.input_mode = InputMode::Normal;
                     None
                 }
                 (KeyModifiers::NONE, KeyCode::Enter) => match self.active_tab {
                     AppTab::Console => Some(Action::SubmitConsoleCommand),
                     AppTab::Modrinth => Some(Action::SubmitModrinthSearch),
+                    AppTab::Settings => {
+                        if self.editing_property.is_some() {
+                            Some(Action::SubmitEditProperty)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                },
+                (KeyModifiers::NONE, KeyCode::PageUp) => match self.active_tab {
+                    AppTab::Console => Some(Action::ScrollLogUp(15)),
+                    _ => None,
+                },
+                (KeyModifiers::NONE, KeyCode::PageDown) => match self.active_tab {
+                    AppTab::Console => Some(Action::ScrollLogDown(15)),
                     _ => None,
                 },
                 _ => {
@@ -498,16 +789,27 @@ impl App {
                             self.modrinth_input
                                 .handle_event(&crossterm::event::Event::Key(key));
                         }
+                        AppTab::Settings => {
+                            if let Some(ref mut input) = self.editing_property {
+                                input.handle_event(&crossterm::event::Event::Key(key));
+                            }
+                        }
                         _ => {}
                     }
                     None
                 }
             }
         } else {
-            // MODO NORMAL (Rule 1): Navegación global activa
+            // MODO NORMAL: Navegación global activa
             match (key.modifiers, key.code) {
                 (KeyModifiers::CONTROL, KeyCode::Char('c'))
                 | (KeyModifiers::NONE, KeyCode::Char('q')) => Some(Action::Quit),
+                (KeyModifiers::NONE, KeyCode::Char('h')) | (KeyModifiers::NONE, KeyCode::Left) => {
+                    Some(Action::FocusSidebar)
+                }
+                (KeyModifiers::NONE, KeyCode::Char('l')) | (KeyModifiers::NONE, KeyCode::Right) => {
+                    Some(Action::FocusMainPanel)
+                }
                 (KeyModifiers::NONE, KeyCode::Char('j')) | (KeyModifiers::NONE, KeyCode::Down) => {
                     Some(Action::Down)
                 }
@@ -522,24 +824,69 @@ impl App {
                 (KeyModifiers::NONE, KeyCode::Char('4')) => Some(Action::GoToTab(3)),
                 (KeyModifiers::NONE, KeyCode::Char('r')) => Some(Action::RefreshInstances),
                 (KeyModifiers::NONE, KeyCode::Char('n')) => Some(Action::OpenCreateModal),
-                (KeyModifiers::NONE, KeyCode::Char(' ')) => match self.active_tab {
-                    AppTab::Settings => Some(Action::ToggleProperty),
-                    _ => Some(Action::ToggleServer),
-                },
-                (KeyModifiers::NONE, KeyCode::Char('i')) => {
-                    self.input_mode = InputMode::Insert;
-                    None
+                (KeyModifiers::NONE, KeyCode::Char(' ')) => {
+                    if self.focus == Focus::MainPanel && self.active_tab == AppTab::Settings {
+                        Some(Action::ToggleProperty)
+                    } else {
+                        Some(Action::ToggleServer)
+                    }
                 }
-                (KeyModifiers::NONE, KeyCode::Enter) => match self.active_tab {
+                (KeyModifiers::NONE, KeyCode::Char('i')) => match self.active_tab {
                     AppTab::Console | AppTab::Modrinth => {
+                        self.focus = Focus::MainPanel;
                         self.input_mode = InputMode::Insert;
                         None
                     }
-                    AppTab::Settings => Some(Action::ToggleProperty),
+                    AppTab::Settings => {
+                        self.focus = Focus::MainPanel;
+                        Some(Action::StartEditProperty)
+                    }
                     _ => None,
                 },
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    if self.focus == Focus::MainPanel {
+                        match self.active_tab {
+                            AppTab::Console => {
+                                self.input_mode = InputMode::Insert;
+                                None
+                            }
+                            AppTab::Modrinth => Some(Action::InstallSelectedMod),
+                            AppTab::Settings => {
+                                if let Some((k, v)) =
+                                    self.properties_list.get(self.selected_property)
+                                {
+                                    if is_boolean_property(k, v) || is_enum_property(k) {
+                                        Some(Action::ToggleProperty)
+                                    } else {
+                                        Some(Action::StartEditProperty)
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        match self.active_tab {
+                            AppTab::Console | AppTab::Modrinth => {
+                                self.focus = Focus::MainPanel;
+                                self.input_mode = InputMode::Insert;
+                                None
+                            }
+                            _ => None,
+                        }
+                    }
+                }
                 (KeyModifiers::NONE, KeyCode::PageUp) => Some(Action::ScrollLogUp(15)),
                 (KeyModifiers::NONE, KeyCode::PageDown) => Some(Action::ScrollLogDown(15)),
+                (KeyModifiers::NONE, KeyCode::Home) => match self.active_tab {
+                    AppTab::Console => Some(Action::ScrollLogUp(usize::MAX)),
+                    _ => None,
+                },
+                (KeyModifiers::NONE, KeyCode::End) => match self.active_tab {
+                    AppTab::Console => Some(Action::ScrollLogBottom),
+                    _ => None,
+                },
                 (KeyModifiers::NONE, KeyCode::Char('s')) => {
                     if self.active_tab == AppTab::Settings {
                         Some(Action::SaveProperties)
@@ -562,22 +909,50 @@ impl App {
                 self.abort_console_stream();
                 self.should_quit = true;
             }
+            Action::FocusSidebar => {
+                self.clear_status();
+                self.focus = Focus::Sidebar;
+            }
+            Action::FocusMainPanel => {
+                self.clear_status();
+                self.focus = Focus::MainPanel;
+            }
+            Action::ToggleFocus => {
+                self.clear_status();
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::MainPanel,
+                    Focus::MainPanel => Focus::Sidebar,
+                };
+            }
             Action::Up => {
-                if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
-                    if self.selected_property > 0 {
-                        self.selected_property -= 1;
-                    } else {
-                        self.selected_property = self.properties_list.len() - 1;
+                if self.focus == Focus::MainPanel {
+                    if self.active_tab == AppTab::Console {
+                        let max_scroll = self.console_max_scroll();
+                        if max_scroll > 0 {
+                            self.console_scroll =
+                                self.console_scroll.saturating_add(1).min(max_scroll);
+                            self.auto_scroll = false;
+                        } else {
+                            self.console_scroll = 0;
+                        }
+                        return;
                     }
-                    return;
-                }
-                if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
-                    if self.selected_mod_hit > 0 {
-                        self.selected_mod_hit -= 1;
-                    } else {
-                        self.selected_mod_hit = self.modrinth_hits.len() - 1;
+                    if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
+                        if self.selected_property > 0 {
+                            self.selected_property -= 1;
+                        } else {
+                            self.selected_property = self.properties_list.len() - 1;
+                        }
+                        return;
                     }
-                    return;
+                    if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
+                        if self.selected_mod_hit > 0 {
+                            self.selected_mod_hit -= 1;
+                        } else {
+                            self.selected_mod_hit = self.modrinth_hits.len() - 1;
+                        }
+                        return;
+                    }
                 }
                 if !self.instances.is_empty() {
                     let prev_idx = self.selected_instance;
@@ -587,6 +962,7 @@ impl App {
                         self.selected_instance -= 1;
                     }
                     if prev_idx != self.selected_instance {
+                        self.clear_status();
                         self.log_buffer.clear();
                         self.console_scroll = 0;
                         self.auto_scroll = true;
@@ -596,21 +972,32 @@ impl App {
                 }
             }
             Action::Down => {
-                if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
-                    if self.selected_property + 1 < self.properties_list.len() {
-                        self.selected_property += 1;
-                    } else {
-                        self.selected_property = 0;
+                if self.focus == Focus::MainPanel {
+                    if self.active_tab == AppTab::Console {
+                        let max_scroll = self.console_max_scroll();
+                        self.console_scroll =
+                            self.console_scroll.min(max_scroll).saturating_sub(1);
+                        if self.console_scroll == 0 {
+                            self.auto_scroll = true;
+                        }
+                        return;
                     }
-                    return;
-                }
-                if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
-                    if self.selected_mod_hit + 1 < self.modrinth_hits.len() {
-                        self.selected_mod_hit += 1;
-                    } else {
-                        self.selected_mod_hit = 0;
+                    if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
+                        if self.selected_property + 1 < self.properties_list.len() {
+                            self.selected_property += 1;
+                        } else {
+                            self.selected_property = 0;
+                        }
+                        return;
                     }
-                    return;
+                    if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
+                        if self.selected_mod_hit + 1 < self.modrinth_hits.len() {
+                            self.selected_mod_hit += 1;
+                        } else {
+                            self.selected_mod_hit = 0;
+                        }
+                        return;
+                    }
                 }
                 if !self.instances.is_empty() {
                     let prev_idx = self.selected_instance;
@@ -620,6 +1007,7 @@ impl App {
                         self.selected_instance += 1;
                     }
                     if prev_idx != self.selected_instance {
+                        self.clear_status();
                         self.log_buffer.clear();
                         self.console_scroll = 0;
                         self.auto_scroll = true;
@@ -629,14 +1017,20 @@ impl App {
                 }
             }
             Action::NextTab => {
+                self.clear_status();
                 let idx = self.active_tab as usize;
                 let next = (idx + 1) % AppTab::ALL.len();
                 self.active_tab = AppTab::ALL[next];
+                self.focus = match self.active_tab {
+                    AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
+                    AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
+                };
                 if self.active_tab == AppTab::Console && self.console_task.is_none() {
                     self.start_console_stream(event_tx);
                 }
             }
             Action::PrevTab => {
+                self.clear_status();
                 let idx = self.active_tab as usize;
                 let prev = if idx == 0 {
                     AppTab::ALL.len() - 1
@@ -644,17 +1038,47 @@ impl App {
                     idx - 1
                 };
                 self.active_tab = AppTab::ALL[prev];
+                self.focus = match self.active_tab {
+                    AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
+                    AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
+                };
                 if self.active_tab == AppTab::Console && self.console_task.is_none() {
                     self.start_console_stream(event_tx);
                 }
             }
             Action::GoToTab(idx) => {
+                self.clear_status();
                 if idx < AppTab::ALL.len() {
                     self.active_tab = AppTab::ALL[idx];
+                    self.focus = match self.active_tab {
+                        AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
+                        AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
+                    };
                     if self.active_tab == AppTab::Console && self.console_task.is_none() {
                         self.start_console_stream(event_tx);
                     }
                 }
+            }
+            Action::StartEditProperty => {
+                if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
+                    let val = self.properties_list[self.selected_property].1.clone();
+                    self.editing_property = Some(Input::new(val));
+                    self.input_mode = InputMode::Insert;
+                }
+            }
+            Action::CancelEditProperty => {
+                self.editing_property = None;
+                self.input_mode = InputMode::Normal;
+            }
+            Action::SubmitEditProperty => {
+                if let Some(input) = self.editing_property.take() {
+                    let new_val = input.value().to_string();
+                    if let Some((_, v)) = self.properties_list.get_mut(self.selected_property) {
+                        *v = new_val;
+                        self.properties_dirty = true;
+                    }
+                }
+                self.input_mode = InputMode::Normal;
             }
             Action::RefreshInstances => {
                 self.reload_instances();
@@ -672,11 +1096,17 @@ impl App {
                 }
             }
             Action::ScrollLogUp(lines) => {
-                self.console_scroll = self.console_scroll.saturating_add(lines);
-                self.auto_scroll = false;
+                let max_scroll = self.console_max_scroll();
+                if max_scroll > 0 {
+                    self.console_scroll = self.console_scroll.saturating_add(lines).min(max_scroll);
+                    self.auto_scroll = false;
+                } else {
+                    self.console_scroll = 0;
+                }
             }
             Action::ScrollLogDown(lines) => {
-                self.console_scroll = self.console_scroll.saturating_sub(lines);
+                let max_scroll = self.console_max_scroll();
+                self.console_scroll = self.console_scroll.min(max_scroll).saturating_sub(lines);
                 if self.console_scroll == 0 {
                     self.auto_scroll = true;
                 }
@@ -741,24 +1171,48 @@ impl App {
         }
     }
 
-    fn execute_toggle_server(
-        &self,
+    pub fn execute_toggle_server(
+        &mut self,
         event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
     ) {
-        let inst = match self.selected() {
-            Some(i) => i.clone(),
+        let (inst_name, current_state) = match self.selected() {
+            Some(i) => (i.name.clone(), i.state),
             None => return,
         };
+
+        // Actualización reactiva inmediata en memoria
+        if let Some(inst) = self.instances.get_mut(self.selected_instance) {
+            match current_state {
+                ServerState::Offline => {
+                    inst.state = ServerState::Starting;
+                    self.set_status(&format!("Iniciando '{}'...", inst_name));
+                }
+                ServerState::Online | ServerState::Starting => {
+                    inst.state = ServerState::Stopping;
+                    self.set_status(&format!("Deteniendo '{}'...", inst_name));
+                }
+                ServerState::Stopping => {}
+            }
+        }
+
         let paths = self.paths.clone();
         let tx = event_tx.clone();
+        let name = inst_name.clone();
 
         tokio::spawn(async move {
-            let sock = paths.socket_path(&inst.name);
-            if is_daemon_running(&sock).await {
+            let sock = paths.socket_path(&name);
+            let state = query_instance_state(&paths, &name).await;
+            if state == ServerState::Online || is_daemon_running(&sock).await {
+                let _ = tx
+                    .send(crate::tui::event::AppEvent::InstanceStatusChanged {
+                        name: name.clone(),
+                        state: ServerState::Stopping,
+                    })
+                    .await;
                 let _ = tx
                     .send(crate::tui::event::AppEvent::StatusMessage(format!(
                         "Deteniendo '{}'...",
-                        inst.name
+                        name
                     )))
                     .await;
                 let _ = crate::daemon::socket::send_request(
@@ -766,19 +1220,20 @@ impl App {
                     &crate::daemon::socket::SocketRequest::Stop,
                 )
                 .await;
-                for _ in 0..20 {
+                for _ in 0..40 {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if !is_daemon_running(&sock).await {
+                    let cur = query_instance_state(&paths, &name).await;
+                    if cur == ServerState::Offline {
                         let _ = tx
                             .send(crate::tui::event::AppEvent::InstanceStatusChanged {
-                                name: inst.name.clone(),
-                                is_online: false,
+                                name: name.clone(),
+                                state: ServerState::Offline,
                             })
                             .await;
                         let _ = tx
                             .send(crate::tui::event::AppEvent::StatusMessage(format!(
                                 "✓ Servidor '{}' detenido.",
-                                inst.name
+                                name
                             )))
                             .await;
                         break;
@@ -786,26 +1241,33 @@ impl App {
                 }
             } else {
                 let _ = tx
+                    .send(crate::tui::event::AppEvent::InstanceStatusChanged {
+                        name: name.clone(),
+                        state: ServerState::Starting,
+                    })
+                    .await;
+                let _ = tx
                     .send(crate::tui::event::AppEvent::StatusMessage(format!(
                         "Iniciando '{}'...",
-                        inst.name
+                        name
                     )))
                     .await;
-                match crate::daemon::supervisor::spawn_daemon_detached(&inst.name) {
+                match crate::daemon::supervisor::spawn_daemon_detached(&name) {
                     Ok(()) => {
-                        for _ in 0..24 {
+                        for _ in 0..60 {
                             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                            if is_daemon_running(&sock).await {
+                            let cur = query_instance_state(&paths, &name).await;
+                            if cur == ServerState::Online {
                                 let _ = tx
                                     .send(crate::tui::event::AppEvent::InstanceStatusChanged {
-                                        name: inst.name.clone(),
-                                        is_online: true,
+                                        name: name.clone(),
+                                        state: ServerState::Online,
                                     })
                                     .await;
                                 let _ = tx
                                     .send(crate::tui::event::AppEvent::StatusMessage(format!(
                                         "✓ Servidor '{}' ONLINE.",
-                                        inst.name
+                                        name
                                     )))
                                     .await;
                                 break;
@@ -813,6 +1275,12 @@ impl App {
                         }
                     }
                     Err(e) => {
+                        let _ = tx
+                            .send(crate::tui::event::AppEvent::InstanceStatusChanged {
+                                name: name.clone(),
+                                state: ServerState::Offline,
+                            })
+                            .await;
                         let _ = tx
                             .send(crate::tui::event::AppEvent::StatusMessage(format!(
                                 "Error al lanzar daemon: {}",

@@ -32,7 +32,11 @@ pub async fn download_server_jar(
 
 pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>> {
     let client = reqwest::Client::builder()
-        .user_agent("mcserman/0.1.0 (https://github.com/AdrianChaSan/mcserman)")
+        .user_agent(concat!(
+            "mcserman/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://github.com/AdrianChaSan/mcserman)"
+        ))
         .build()?;
 
     let mut versions = match loader {

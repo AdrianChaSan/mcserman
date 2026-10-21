@@ -39,11 +39,13 @@
               pkg-config
             ];
             buildInputs = with pkgs; [
+              temurin-bin-25
               temurin-bin-21
               temurin-bin-17
               temurin-bin-8
             ];
             shellHook = ''
+              export MCSERVER_JAVA_25_PATH="${pkgs.temurin-bin-25}/bin/java"
               export MCSERVER_JAVA_21_PATH="${pkgs.temurin-bin-21}/bin/java"
               export MCSERVER_JAVA_17_PATH="${pkgs.temurin-bin-17}/bin/java"
               export MCSERVER_JAVA_8_PATH="${pkgs.temurin-bin-8}/bin/java"

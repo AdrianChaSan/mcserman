@@ -82,9 +82,16 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let is_sidebar_focused = app.focus == crate::tui::app::Focus::Sidebar;
+    let border_style = if is_sidebar_focused {
+        theme.active_border
+    } else {
+        theme.border
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.border)
+        .border_style(border_style)
         .title(format!(" 📦 Servidores ({}) ", app.instances.len()));
 
     if app.instances.is_empty() {
@@ -95,42 +102,51 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .instances
-        .iter()
-        .enumerate()
-        .map(|(i, inst)| {
-            let is_selected = i == app.selected_instance;
-            let pointer = if is_selected { "▸ " } else { "  " };
+    let items: Vec<ListItem> =
+        app.instances
+            .iter()
+            .enumerate()
+            .map(|(i, inst)| {
+                let is_selected = i == app.selected_instance;
+                let pointer = if is_selected && is_sidebar_focused {
+                    "▸ "
+                } else {
+                    "  "
+                };
 
-            let status_dot = if inst.is_online {
-                Span::styled("● ", theme.success)
-            } else {
-                Span::styled("○ ", theme.muted)
-            };
+                let status_dot = match inst.state {
+                    crate::tui::app::ServerState::Online => Span::styled("● ", theme.success),
+                    crate::tui::app::ServerState::Starting
+                    | crate::tui::app::ServerState::Stopping => Span::styled("◐ ", theme.warning),
+                    crate::tui::app::ServerState::Offline => Span::styled("○ ", theme.muted),
+                };
 
-            let name_style = if is_selected {
-                theme.highlight
-            } else {
-                theme.base
-            };
-
-            let line = Line::from(vec![
-                Span::styled(
-                    pointer,
-                    if is_selected {
-                        theme.accent
+                let name_style = if is_selected {
+                    if is_sidebar_focused {
+                        theme.highlight
                     } else {
-                        theme.muted
-                    },
-                ),
-                status_dot,
-                Span::styled(&inst.name, name_style),
-            ]);
+                        Style::default().fg(Color::White).bg(Color::Rgb(28, 34, 44))
+                    }
+                } else {
+                    theme.base
+                };
 
-            ListItem::new(line)
-        })
-        .collect();
+                let line = Line::from(vec![
+                    Span::styled(
+                        pointer,
+                        if is_selected && is_sidebar_focused {
+                            theme.accent
+                        } else {
+                            theme.muted
+                        },
+                    ),
+                    status_dot,
+                    Span::styled(&inst.name, name_style),
+                ]);
+
+                ListItem::new(line)
+            })
+            .collect();
 
     let list = List::new(items).block(block);
     f.render_widget(list, area);
@@ -141,6 +157,13 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
+
+    let is_main_focused = app.focus == crate::tui::app::Focus::MainPanel;
+    let tab_border = if is_main_focused {
+        theme.active_border
+    } else {
+        theme.border
+    };
 
     // Barra de Tabs
     let tab_titles: Vec<Line> = AppTab::ALL
@@ -159,7 +182,7 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(theme.border),
+                .border_style(tab_border),
         )
         .select(app.active_tab as usize)
         .highlight_style(theme.accent);
@@ -176,28 +199,92 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let status_text = if let Some((ref msg, _)) = app.status_message {
-        Span::styled(format!(" ℹ️ {} ", msg), theme.accent)
-    } else {
-        Span::styled(" mcserman v0.1.0 ", theme.muted)
-    };
+    let footer_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(16)])
+        .split(area);
 
-    let hints = if app.input_mode == InputMode::Insert {
-        Span::styled(
-            " Esc: Salir a Modo Normal │ Enter: Confirmar/Enviar",
-            theme.accent,
-        )
+    let base_hints = if app.show_create_modal {
+        if app.input_mode == InputMode::Insert {
+            Span::styled(
+                "Esc: Dejar de editar │ Enter: Confirmar │ Tab: Siguiente campo",
+                theme.accent,
+            )
+        } else {
+            Span::styled(
+                "Esc: Cerrar modal │ i/Enter: Editar campo │ Tab/↓: Siguiente │ Enter: Crear",
+                theme.base,
+            )
+        }
+    } else if app.input_mode == InputMode::Insert {
+        if app.editing_property.is_some() {
+            Span::styled(
+                "Esc: Cancelar edición │ Enter: Guardar valor",
+                theme.accent,
+            )
+        } else {
+            Span::styled(
+                "Esc: Salir a Modo Normal │ Enter: Confirmar/Enviar",
+                theme.accent,
+            )
+        }
     } else {
         match app.active_tab {
-            AppTab::Dashboard => Span::styled(" q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ 1-4: Tabs", theme.base),
-            AppTab::Console => Span::styled(" q: Salir │ i/Enter: Escribir comando │ PgUp/PgDn: Desplazar historial │ 1-4: Tabs", theme.base),
-            AppTab::Modrinth => Span::styled(" q: Salir │ i: Buscar │ j/k: Resultados │ Enter: Instalar │ 1-4: Tabs", theme.base),
-            AppTab::Settings => Span::styled(" q: Salir │ j/k: Config │ Space/Enter: Cambiar valor │ s: Guardar │ 1-4: Tabs", theme.base),
+            AppTab::Dashboard => {
+                if app.focus == crate::tui::app::Focus::Sidebar {
+                    Span::styled(
+                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ l/→: Panel │ 1-4: Tabs",
+                        theme.base,
+                    )
+                } else {
+                    Span::styled(
+                        "q: Salir │ h/←: Sidebar │ Space: Iniciar/Parar │ n: Nuevo │ 1-4: Tabs",
+                        theme.base,
+                    )
+                }
+            }
+            AppTab::Console => Span::styled(
+                "q: Salir │ i/Enter: Escribir comando │ PgUp/PgDn: Historial │ h/l: Foco │ 1-4: Tabs",
+                theme.base,
+            ),
+            AppTab::Modrinth => Span::styled(
+                "q: Salir │ i: Buscar │ j/k: Resultados │ Enter: Instalar │ h/l: Foco │ 1-4: Tabs",
+                theme.base,
+            ),
+            AppTab::Settings => Span::styled(
+                "q: Salir │ j/k: Navegar │ Space/Enter: Editar/Alternar │ s: Guardar │ h/l: Foco │ 1-4: Tabs",
+                theme.base,
+            ),
         }
     };
 
-    let line = Line::from(vec![hints, Span::raw("   "), status_text]);
+    // Auto-expiración del toast/mensaje a los 3 segundos
+    let status_active = if let Some((ref msg, instant)) = app.status_message {
+        if instant.elapsed() <= std::time::Duration::from_secs(3) {
+            Some(msg)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(24, 28, 36)));
-    f.render_widget(p, area);
+    let line_spans = if let Some(msg) = status_active {
+        vec![
+            Span::styled(format!(" ℹ️ {} ", msg), theme.accent),
+            Span::styled("│ ", theme.muted),
+            base_hints,
+        ]
+    } else {
+        vec![Span::raw(" "), base_hints]
+    };
+
+    let left_p = Paragraph::new(Line::from(line_spans))
+        .style(Style::default().bg(Color::Rgb(24, 28, 36)));
+    f.render_widget(left_p, footer_chunks[0]);
+
+    let version_p = Paragraph::new(concat!("mcserman v", env!("CARGO_PKG_VERSION"), " "))
+        .style(theme.muted.bg(Color::Rgb(24, 28, 36)))
+        .alignment(Alignment::Right);
+    f.render_widget(version_p, footer_chunks[1]);
 }

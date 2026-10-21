@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::time::timeout;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SocketRequest {
@@ -19,12 +21,16 @@ pub enum SocketResponse {
 }
 
 pub async fn send_request(socket_path: &Path, req: &SocketRequest) -> Result<SocketResponse> {
-    let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
-        format!(
-            "No se pudo conectar al socket en {}. ¿Está el servidor encendido?",
-            socket_path.display()
-        )
-    })?;
+    let connect_future = UnixStream::connect(socket_path);
+    let mut stream = timeout(Duration::from_millis(600), connect_future)
+        .await
+        .map_err(|_| anyhow::anyhow!("Timeout al conectar con el socket en {}", socket_path.display()))?
+        .with_context(|| {
+            format!(
+                "No se pudo conectar al socket en {}. ¿Está el servidor encendido?",
+                socket_path.display()
+            )
+        })?;
 
     let json = serde_json::to_string(req)? + "\n";
     stream.write_all(json.as_bytes()).await?;
@@ -32,7 +38,9 @@ pub async fn send_request(socket_path: &Path, req: &SocketRequest) -> Result<Soc
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line).await?;
+    timeout(Duration::from_millis(600), reader.read_line(&mut response_line))
+        .await
+        .map_err(|_| anyhow::anyhow!("Timeout esperando respuesta del socket"))??;
 
     let resp: SocketResponse = serde_json::from_str(&response_line)
         .context("Respuesta inválida recibida del socket de mcserman")?;
@@ -46,10 +54,6 @@ pub async fn is_daemon_running(socket_path: &Path) -> bool {
     }
     match send_request(socket_path, &SocketRequest::Ping).await {
         Ok(SocketResponse::Ok(_)) => true,
-        _ => {
-            // El socket existe pero no responde (socket huérfano de crash previo)
-            let _ = std::fs::remove_file(socket_path);
-            false
-        }
+        _ => false,
     }
 }

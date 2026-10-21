@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "mcserman")]
 #[command(author = "AdrianChaSan")]
-#[command(version = "0.1.0")]
+#[command(version = "0.1.1")]
 #[command(about = "A high-performance, host-independent Minecraft Dedicated Server Manager in Rust", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
