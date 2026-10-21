@@ -1,5 +1,5 @@
 {
-  description = "A powerful, host-independent Minecraft Dedicated Server Manager in Rust";
+  description = "A terminal Minecraft server manager built with Rust and ratatui";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -58,7 +58,7 @@
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/mcserman";
-          meta.description = "A powerful, host-independent Minecraft Dedicated Server Manager in Rust";
+          meta.description = "A terminal Minecraft server manager built with Rust and ratatui";
         };
       });
     };

@@ -11,7 +11,7 @@ use crate::daemon::socket::{is_daemon_running, send_request, SocketRequest, Sock
 use crate::modrinth::api::SearchHit;
 use crate::tui::action::Action;
 
-pub const MAX_LOG_LINES: usize = 1500;
+pub const MAX_LOG_LINES: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -84,7 +84,7 @@ pub fn sanitize_log_line(raw: &str) -> String {
     // Si la línea contiene \r en medio (reescrituras de JLine/Paper o barras de progreso),
     // la última parte no vacía representa el texto final sobreescrito en pantalla.
     let text_to_process = if s.contains('\r') {
-        s.split('\r').filter(|part| !part.is_empty()).last().unwrap_or("")
+        s.split('\r').rfind(|part| !part.is_empty()).unwrap_or("")
     } else {
         s
     };
@@ -215,6 +215,9 @@ pub struct App {
     pub auto_scroll: bool,
     pub console_input: Input,
     pub console_task: Option<tokio::task::JoinHandle<()>>,
+    pub active_console_instance: Option<String>,
+    pub log_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    pub log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>,
 
     // Modrinth
     pub modrinth_input: Input,
@@ -246,6 +249,7 @@ pub struct App {
 
 impl App {
     pub fn new(paths: SystemPaths) -> Self {
+        let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
             should_quit: false,
             input_mode: InputMode::Normal,
@@ -263,6 +267,9 @@ impl App {
             auto_scroll: true,
             console_input: Input::default(),
             console_task: None,
+            active_console_instance: None,
+            log_tx,
+            log_rx: Some(log_rx),
 
             // Modrinth
             modrinth_input: Input::default(),
@@ -370,7 +377,7 @@ impl App {
             .iter()
             .map(|raw| {
                 let len = raw.chars().count();
-                (len.max(1) + inner_width - 1) / inner_width
+                len.max(1).div_ceil(inner_width)
             })
             .sum()
     }
@@ -425,50 +432,91 @@ impl App {
         }
     }
 
-    pub fn start_console_stream(
-        &mut self,
-        event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
-    ) {
-        self.abort_console_stream();
+    pub fn handle_log_line(&mut self, instance: &str, line: String) {
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.name == instance) {
+            if inst.state == ServerState::Offline {
+                inst.state = ServerState::Starting;
+            }
+        }
+        if let Some(selected) = self.selected() {
+            if selected.name == instance {
+                self.push_log_line(line);
+            }
+        }
+    }
+
+    pub fn start_console_stream(&mut self) {
         let selected_name = match self.selected() {
             Some(s) => s.name.clone(),
-            None => return,
+            None => {
+                self.abort_console_stream();
+                self.active_console_instance = None;
+                self.log_buffer.clear();
+                return;
+            }
         };
+
+        // Si ya está activo el stream para esta misma instancia, no hacer nada (evita re-leer disco o reiniciar)
+        if self.active_console_instance.as_deref() == Some(&selected_name)
+            && self.console_task.is_some()
+        {
+            return;
+        }
+
+        self.abort_console_stream();
+        self.active_console_instance = Some(selected_name.clone());
+        self.log_buffer.clear();
+        self.console_scroll = 0;
+        self.auto_scroll = true;
+
         let log_path = self.paths.logs_file(&selected_name);
-        let tx = event_tx.clone();
+        let tx = self.log_tx.clone();
         let name_clone = selected_name.clone();
 
         let task = tokio::spawn(async move {
-            // Lectura inicial del archivo
-            if let Ok(file) = tokio::fs::File::open(&log_path).await {
+            // Lectura inicial del archivo: seek al final del archivo si es grande (máx 500 líneas)
+            if let Ok(mut file) = tokio::fs::File::open(&log_path).await {
                 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+                let file_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+                const CHUNK_SIZE: u64 = 128 * 1024; // 128 KB
+                let seek_pos = file_len.saturating_sub(CHUNK_SIZE);
+
+                if seek_pos > 0 {
+                    let _ = file.seek(std::io::SeekFrom::Start(seek_pos)).await;
+                }
+
                 let mut reader = BufReader::new(file);
-                let mut lines = Vec::new();
                 let mut line = String::new();
+
+                // Si se hizo seek a mitad de archivo, descartar la primera línea incompleta
+                if seek_pos > 0 {
+                    let _ = reader.read_line(&mut line).await;
+                    line.clear();
+                }
+
+                let mut lines = Vec::new();
                 while let Ok(n) = reader.read_line(&mut line).await {
                     if n == 0 {
                         break;
                     }
-                    let trimmed = line.trim_end().to_string();
+                    let clean = sanitize_log_line(&line);
+                    let trimmed = clean.trim_end();
                     if !trimmed.is_empty() {
-                        lines.push(trimmed);
+                        lines.push(trimmed.to_string());
                     }
                     line.clear();
                 }
 
-                // Enviar tail inicial (máximo 250 líneas)
-                let start = if lines.len() > 250 {
-                    lines.len() - 250
+                // Conservar máximo 500 líneas del tail inicial
+                let start = if lines.len() > 500 {
+                    lines.len() - 500
                 } else {
                     0
                 };
                 for l in &lines[start..] {
-                    let _ = tx
-                        .send(crate::tui::event::AppEvent::LogLineReceived {
-                            instance: name_clone.clone(),
-                            line: l.clone(),
-                        })
-                        .await;
+                    if tx.send((name_clone.clone(), l.clone())).is_err() {
+                        return;
+                    }
                 }
 
                 // Streaming en vivo
@@ -488,15 +536,10 @@ impl App {
                                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                                 }
                                 Ok(_) => {
-                                    let trimmed = line_buf.trim_end().to_string();
+                                    let clean = sanitize_log_line(&line_buf);
+                                    let trimmed = clean.trim_end();
                                     if !trimmed.is_empty()
-                                        && tx
-                                            .send(crate::tui::event::AppEvent::LogLineReceived {
-                                                instance: name_clone.clone(),
-                                                line: trimmed,
-                                            })
-                                            .await
-                                            .is_err()
+                                        && tx.send((name_clone.clone(), trimmed.to_string())).is_err()
                                     {
                                         break;
                                     }
@@ -966,7 +1009,8 @@ impl App {
                         self.log_buffer.clear();
                         self.console_scroll = 0;
                         self.auto_scroll = true;
-                        self.start_console_stream(event_tx);
+                        self.active_console_instance = None;
+                        self.start_console_stream();
                         self.load_properties_for_selected();
                     }
                 }
@@ -1011,7 +1055,8 @@ impl App {
                         self.log_buffer.clear();
                         self.console_scroll = 0;
                         self.auto_scroll = true;
-                        self.start_console_stream(event_tx);
+                        self.active_console_instance = None;
+                        self.start_console_stream();
                         self.load_properties_for_selected();
                     }
                 }
@@ -1025,8 +1070,8 @@ impl App {
                     AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
                     AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
                 };
-                if self.active_tab == AppTab::Console && self.console_task.is_none() {
-                    self.start_console_stream(event_tx);
+                if self.active_tab == AppTab::Console {
+                    self.start_console_stream();
                 }
             }
             Action::PrevTab => {
@@ -1042,8 +1087,8 @@ impl App {
                     AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
                     AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
                 };
-                if self.active_tab == AppTab::Console && self.console_task.is_none() {
-                    self.start_console_stream(event_tx);
+                if self.active_tab == AppTab::Console {
+                    self.start_console_stream();
                 }
             }
             Action::GoToTab(idx) => {
@@ -1054,8 +1099,8 @@ impl App {
                         AppTab::Dashboard | AppTab::Console => Focus::Sidebar,
                         AppTab::Modrinth | AppTab::Settings => Focus::MainPanel,
                     };
-                    if self.active_tab == AppTab::Console && self.console_task.is_none() {
-                        self.start_console_stream(event_tx);
+                    if self.active_tab == AppTab::Console {
+                        self.start_console_stream();
                     }
                 }
             }

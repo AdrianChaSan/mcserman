@@ -52,8 +52,8 @@ pub async fn is_daemon_running(socket_path: &Path) -> bool {
     if !socket_path.exists() {
         return false;
     }
-    match send_request(socket_path, &SocketRequest::Ping).await {
-        Ok(SocketResponse::Ok(_)) => true,
-        _ => false,
-    }
+    matches!(
+        send_request(socket_path, &SocketRequest::Ping).await,
+        Ok(SocketResponse::Ok(_))
+    )
 }

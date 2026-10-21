@@ -1,9 +1,9 @@
 [package]
 name = "mcserman"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["AdrianChaSan <https://github.com/AdrianChaSan>"]
-description = "A powerful, host-independent Minecraft Dedicated Server Manager written in Rust"
+description = "A terminal Minecraft server manager built with Rust and ratatui"
 
 [dependencies]
 # CLI y prompts interactivos

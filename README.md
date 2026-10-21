@@ -1,74 +1,31 @@
-# ⛏️ mcserman (mc-server-manager)
+# ⛏️ mcserman
 
-> **A high-performance, host-independent Minecraft Dedicated Server Manager in Rust with full Ratatui TUI and headless CLI.**
-
-`mcserman` allows you to create, manage, configure, and supervise multi-instance Minecraft servers with zero external bloat. It features an interactive **Ratatui TUI dashboard**, native Unix domain socket supervision, multi-JDK management, Modrinth API integration, and first-class **NixOS** flake support.
-
----
-
-## ✨ Key Features
-
-- 🖥️ **Full Interactive TUI (Ratatui & Crossterm):** Modern terminal dashboard with sidebar instance selection, real-time metrics, live log streaming with auto-scroll, in-TUI Modrinth mod/plugin browser, server.properties editor, and modal creation wizards.
-- ⚡ **Dual CLI & TUI Architecture:** Running `mcserman` in an interactive terminal launches the TUI; running subcommands (`start`, `stop`, `daemon`, etc.) operates headlessly with zero UI overhead for scripts, CI/CD, and `systemd`.
-- 🔌 **Hardened Daemon Supervision (`setsid`):** JVM runs in a detached session (`setsid`) with `Stdio::null()`, preventing terminal hangup signals (`SIGHUP`) from killing servers and leveraging an asynchronous process reaper to eliminate zombie (`<defunct>`) processes.
-- ☕ **Smart Multi-JDK Resolution:** Out-of-the-box support for Java 21, 17, and 8. Automatically detects Nix Store paths (`MCSERVER_JAVA_*_PATH`), system `$PATH`, or falls back to downloading Eclipse Temurin JDKs.
-- 📦 **Multi-Loader Support:** Automated provisioning for Mojang Vanilla, PaperMC (automatic latest build detection via v3 API), and Fabric Loader.
-- 🧩 **Modrinth Integration:** Search and download compatible mods and plugins directly with throttled progress reporting and cryptographic SHA-512 verification.
-- ❄️ **Hermetic NixOS Support:** Flake exports `packages.default` (wrapped with Temurin 21/17/8), `devShells.default` for rapid development, and `nixosModules.default` with systemd template unit `mcserver@<instance>.service`.
+A terminal Minecraft server manager built with Rust and [Ratatui](https://github.com/ratatui/ratatui), tailored for NixOS and Linux.
+It provides an intuitive, keyboard-driven dashboard to create, manage, configure, and monitor multi-instance Minecraft servers with zero bloat.
 
 ---
 
-## 🎮 TUI Controls & Keyboard Shortcuts
+## ✨ Features
 
-When launched without arguments (`mcserman`), the interactive TUI activates:
-
-### Modo Navegación (`InputMode::Normal`)
-
-| Tecla / Atajo | Acción |
-|---|---|
-| `j` / `Down` | Seleccionar siguiente servidor en la barra lateral |
-| `k` / `Up` | Seleccionar servidor anterior en la barra lateral |
-| `Tab` / `Shift+Tab` | Cambiar entre pestañas cíclicamente |
-| `1` - `4` | Acceso directo a pestaña (`1`: Dashboard, `2`: Consola, `3`: Modrinth, `4`: Configuración) |
-| `Space` | Iniciar / Detener servidor seleccionado (o alternar valores booleanos en Configuración) |
-| `n` | Abrir asistente modal de creación de nueva instancia |
-| `r` | Recargar lista de servidores y refrescar estado de sockets |
-| `PgUp` / `PgDn` | Desplazarse por el historial de la consola |
-| `i` / `Enter` | Entrar en modo escritura / foco en input de texto (`InputMode::Insert`) |
-| `s` | Guardar cambios de `server.properties` a disco (pestaña Configuración) |
-| `q` / `Ctrl+C` | Salir limpiamente de la TUI (restaura terminal alternate screen y raw mode) |
-
-### Modo Edición / Inserción (`InputMode::Insert`)
-
-Se activa al enfocar un campo de búsqueda (Modrinth), la línea de comandos (Consola) o el asistente modal de creación (`n`).
-
-*   **Atajos globales desactivados**: Las teclas `q`, `j`, `k`, `Space`, `r` y dígitos `1-4` se comportan como caracteres normales de texto.
-*   `Enter`: Enviar comando a la consola / Iniciar búsqueda en Modrinth / Confirmar creación en el Wizard.
-*   `Esc`: Salir de modo edición y retornar inmediatamente a `InputMode::Normal`.
+- **Multi-Instance Management**: Seamlessly create and manage Paper, Fabric, and Mojang Vanilla server instances with automated loader provisioning and multi-JDK support (Java 21, 17, 8).
+- **Integrated Live Console**: Real-time server log streaming with ANSI color rendering, auto-scrolling, and interactive in-TUI command execution.
+- **Modrinth Browser & Installer**: Search, inspect, and install compatible mods and plugins directly inside the TUI with SHA-512 integrity verification.
+- **Visual `server.properties` Editor**: Interactive key-value configuration editor to inspect and edit server properties with instant disk persistence.
+- **Declarative NixOS Integration**: Native NixOS module and Flake packaging with pre-wrapped Eclipse Temurin Java runtimes from the Nix store.
 
 ---
 
-## 📥 Installation & Usage in NixOS
+## 📦 Installation
 
-### 1. Ejecución Directa (Sin Instalación)
+### NixOS / Flakes
 
-Prueba la TUI de inmediato en NixOS o cualquier distribución con Nix:
+Run directly in any Nix-enabled environment without installing:
+
 ```bash
 nix run github:AdrianChaSan/mcserman
 ```
 
-### 2. Entorno de Desarrollo (`devShell`)
-
-Accede a un entorno reproducible con Rust (`cargo`, `clippy`, `rustfmt`) y los 3 JDKs de Temurin listos:
-```bash
-git clone https://github.com/AdrianChaSan/mcserman.git
-cd mcserman
-nix develop
-```
-
-### 3. Módulo Declarativo en `configuration.nix`
-
-Agrega `mcserman` a los inputs de tu `flake.nix`:
+Or add it declaratively to your `flake.nix`:
 
 ```nix
 {
@@ -81,21 +38,16 @@ Agrega `mcserman` a los inputs de tu `flake.nix`:
     nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        ./configuration.nix
-
-        # 1. Importar el módulo de mcserman
         mcserman.nixosModules.default
-
-        # 2. Configurar el servicio
         {
           services.mcserman = {
             enable = true;
-            adminUser = "your_username"; # Permite gestionar instancias sin sudo
+            adminUser = "your_username"; # Manage instances without sudo
             openFirewall = {
               enable = true;
               port = 25565;
             };
-            javaVersions = [ 21 17 8 ];  # JDKs Temurin preinstalados desde el Nix Store
+            javaVersions = [ 21 17 8 ];  # Bundled Temurin JDKs from Nix store
           };
         }
       ];
@@ -104,76 +56,40 @@ Agrega `mcserman` a los inputs de tu `flake.nix`:
 }
 ```
 
----
+### Cargo
 
-## 🚀 Headless CLI Reference (Scripts & Systemd)
-
-Los subcomandos CLI siguen estando 100% disponibles para automatización y scripts desatendidos:
+Install from source using Cargo:
 
 ```bash
-# Crear instancia sin interacción
-mcserman create survival --loader paper --mc-version 1.21.4 --ram 4G --port 25565
-
-# Listar instancias registradas y estado online/offline
-mcserman list
-
-# Iniciar servidor en segundo plano
-mcserman start survival
-
-# Seguir logs en tiempo real (stdout)
-mcserman logs survival -f
-
-# Ejecutar comandos de consola
-mcserman cmd survival "time set day"
-mcserman cmd survival "say Servidor actualizándose..."
-
-# Detener limpiamente (envía 'stop' a la JVM para guardar mundos)
-mcserman stop survival
-
-# Reiniciar instancia
-mcserman restart survival
-
-# Instalar mods o plugins desde Modrinth vía CLI
-mcserman add-mod survival --query "voicechat"
+cargo install --git https://github.com/AdrianChaSan/mcserman
 ```
 
 ---
 
-## 🛠️ Architecture
+## 🎮 Usage
 
+Simply run `mcserman` in your terminal to launch the interactive TUI dashboard:
+
+```bash
+mcserman
 ```
-                  ┌────────────────────────┐
-                  │      Terminal TTY      │
-                  └───────────┬────────────┘
-                              │
-               ┌──────────────┴──────────────┐
-               │                             │
-    (sin argumentos)                 (con subcomandos)
-               ▼                             ▼
-   ┌───────────────────────┐     ┌───────────────────────┐
-   │      Ratatui TUI      │     │     Headless CLI      │
-   │  - AppState           │     │  - clap subcommands   │
-   │  - Crossterm EventLoop│     │  - scripts / systemd  │
-   │  - TerminalGuard      │     └───────────┬───────────┘
-   └───────────┬───────────┘                 │
-               │                             │
-               └──────────────┬──────────────┘
-                              │
-                              ▼
-                 ┌─────────────────────────┐
-                 │  spawn_daemon_detached  │
-                 │   - POSIX setsid()      │
-                 │   - Tokio Async Reaper  │
-                 └────────────┬────────────┘
-                              │
-                              ▼
-                 ┌─────────────────────────┐
-                 │     mcserman daemon     │
-                 │   - Unix Domain Socket  │
-                 │   - JVM Child Process   │
-                 │   - Auto SIGTERM 'stop' │
-                 └─────────────────────────┘
-```
+
+### Keybindings
+
+| Key | Action |
+|---|---|
+| `j` / `Down` | Select next server in sidebar |
+| `k` / `Up` | Select previous server in sidebar |
+| `Tab` / `Shift+Tab` | Cycle between tabs |
+| `1` - `4` | Direct tab switch (`1`: Dashboard, `2`: Console, `3`: Modrinth, `4`: Config) |
+| `Space` | Start / Stop selected server (or toggle booleans in Config) |
+| `n` | Open modal wizard to create a new instance |
+| `r` | Refresh instance statuses and reload sockets |
+| `s` | Save `server.properties` modifications to disk |
+| `PgUp` / `PgDn` | Scroll console log history |
+| `i` / `Enter` | Enter text input mode (`InputMode::Insert`) |
+| `Esc` | Return to navigation mode (`InputMode::Normal`) |
+| `q` / `Ctrl+C` | Cleanly exit `mcserman` |
 
 ---
 

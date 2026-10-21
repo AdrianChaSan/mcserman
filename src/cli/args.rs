@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "mcserman")]
 #[command(author = "AdrianChaSan")]
-#[command(version = "0.1.1")]
-#[command(about = "A high-performance, host-independent Minecraft Dedicated Server Manager in Rust", long_about = None)]
+#[command(version = "0.1.2")]
+#[command(about = "A terminal Minecraft server manager built with Rust and ratatui", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -12,97 +12,97 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Crear una nueva instancia de servidor de Minecraft
+    /// Create a new Minecraft server instance
     Create {
-        /// Nombre identificador de la instancia
+        /// Identifier name of the instance
         name: Option<String>,
 
-        /// Tipo de modloader (vanilla, paper, fabric)
+        /// Loader type (vanilla, paper, fabric)
         #[arg(short, long)]
         loader: Option<String>,
 
-        /// Versión de Minecraft (ej. 1.21.4)
+        /// Minecraft version (e.g. 1.21.4)
         #[arg(short, long)]
         mc_version: Option<String>,
 
-        /// Memoria RAM máxima asignada (ej. 4G, 8G)
+        /// Maximum allocated RAM (e.g. 4G, 8G)
         #[arg(short, long)]
         ram: Option<String>,
 
-        /// Puerto TCP para el servidor (por defecto 25565)
+        /// TCP port for the server (defaults to 25565)
         #[arg(short, long)]
         port: Option<u16>,
     },
 
-    /// Listar todas las instancias existentes y su estado
+    /// List all existing instances and their status
     List,
 
-    /// Iniciar una instancia del servidor
+    /// Start a server instance
     Start {
-        /// Nombre de la instancia a iniciar
+        /// Name of the instance to start
         name: Option<String>,
     },
 
-    /// Detener una instancia limpiamente con 'stop'
+    /// Stop a server instance cleanly
     Stop {
-        /// Nombre de la instancia a detener
+        /// Name of the instance to stop
         name: Option<String>,
     },
 
-    /// Reiniciar una instancia
+    /// Restart a server instance
     Restart {
-        /// Nombre de la instancia a reiniciar
+        /// Name of the instance to restart
         name: Option<String>,
     },
 
-    /// Mostrar el estado de ejecución de una instancia
+    /// Display the running status of an instance
     Status {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: Option<String>,
     },
 
-    /// Ver los logs del servidor en tiempo real (equivalente a tail -f)
+    /// Stream server logs in real time
     Logs {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: Option<String>,
 
-        /// Seguir la salida de logs en vivo (-f / --follow)
+        /// Follow log output (-f / --follow)
         #[arg(short, long, default_value_t = false)]
         follow: bool,
 
-        /// Número de líneas iniciales a mostrar
+        /// Number of initial lines to display
         #[arg(short, long, default_value_t = 50)]
         lines: usize,
     },
 
-    /// Enviar un comando a la consola de una instancia en ejecución
+    /// Send a command to a running server instance
     Cmd {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: String,
 
-        /// Comando a ejecutar (ej. "op Steve", "time set day")
+        /// Command string to execute (e.g. "time set day")
         command: String,
     },
 
-    /// Entrar a la consola interactiva en vivo
+    /// Open an interactive console session
     Console {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: Option<String>,
     },
 
-    /// Buscar e instalar mods o plugins desde Modrinth
+    /// Search and install mods or plugins from Modrinth
     AddMod {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: Option<String>,
 
-        /// Búsqueda del mod o plugin
+        /// Search query
         query: Option<String>,
     },
 
-    /// Subcomando interno: ejecuta el supervisor del daemon para systemd o segundo plano
+    /// Internal subcommand: supervisor daemon for background / systemd execution
     #[command(hide = true)]
     Daemon {
-        /// Nombre de la instancia
+        /// Name of the instance
         name: String,
     },
 }

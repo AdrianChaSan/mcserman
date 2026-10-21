@@ -61,16 +61,7 @@ async fn main() -> anyhow::Result<()> {
             daemon::supervisor::run_daemon(&name, &paths).await?;
         }
         None => {
-            // Si se ejecuta 'mcserman' sin argumentos y está en una terminal interactiva (TTY)
-            if cli::prompts::is_tty() {
-                tui::run(&paths).await?;
-            } else {
-                // Ejecución desatendida sin argumentos: imprimir ayuda
-                use clap::CommandFactory;
-                let mut cmd = Cli::command();
-                cmd.print_help()?;
-                println!();
-            }
+            tui::run(&paths).await?;
         }
     }
 

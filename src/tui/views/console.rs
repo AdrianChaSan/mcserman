@@ -28,7 +28,7 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let viewport_height = area.height.saturating_sub(2) as usize;
 
-    // 1. Cálculo real de filas visuales con wrap
+    // 1. Cálculo de filas visuales totales con wrap
     let total_visual_lines: usize = if inner_width == 0 {
         0
     } else {
@@ -36,7 +36,7 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             .iter()
             .map(|raw_line| {
                 let line_len = raw_line.chars().count();
-                (line_len.max(1) + inner_width - 1) / inner_width
+                line_len.max(1).div_ceil(inner_width)
             })
             .sum()
     };
@@ -74,24 +74,66 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .border_style(border_style)
         .title(title);
 
-    // 3. Pasar líneas completas y aplicar .scroll((scroll_y, 0))
-    let lines: Vec<Line> = if app.log_buffer.is_empty() {
-        vec![Line::from(Span::styled(
+    // 3. Virtualización del Viewport (Window Slicing)
+    if app.log_buffer.is_empty() {
+        let empty_line = Line::from(Span::styled(
             " No hay registros disponibles para esta instancia.",
             theme.muted,
-        ))]
+        ));
+        let p = Paragraph::new(vec![empty_line]).block(block);
+        f.render_widget(p, area);
     } else {
-        app.log_buffer
-            .iter()
-            .map(|raw_line| format_colored_line(raw_line, theme))
-            .collect()
-    };
+        let total_lines = app.log_buffer.len();
 
-    let p = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll(((scroll_y as u16), 0));
-    f.render_widget(p, area);
+        // Determinar end_idx saltando clamped_scroll filas visuales desde el fondo
+        let mut skip_rows = clamped_scroll;
+        let mut end_idx = total_lines;
+        if inner_width > 0 {
+            while end_idx > 0 && skip_rows > 0 {
+                let line_len = app.log_buffer[end_idx - 1].chars().count();
+                let visual_rows = line_len.max(1).div_ceil(inner_width);
+                if skip_rows >= visual_rows {
+                    skip_rows -= visual_rows;
+                    end_idx -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Acumular filas visuales hacia atrás desde end_idx para cubrir viewport_height
+        let needed_rows = viewport_height + skip_rows;
+        let mut accumulated_rows = 0;
+        let mut start_idx = end_idx;
+        if inner_width > 0 {
+            while start_idx > 0 && accumulated_rows < needed_rows {
+                start_idx -= 1;
+                let line_len = app.log_buffer[start_idx].chars().count();
+                let visual_rows = line_len.max(1).div_ceil(inner_width);
+                accumulated_rows += visual_rows;
+            }
+        } else {
+            start_idx = end_idx.saturating_sub(viewport_height);
+        }
+
+        let slice_lines: Vec<Line> = if start_idx < end_idx {
+            app.log_buffer
+                .range(start_idx..end_idx)
+                .map(|raw_line| format_colored_line(raw_line, theme))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Scroll local mínimo (en caso de wrap parcial de la línea superior o inferior)
+        let local_scroll_y = accumulated_rows.saturating_sub(viewport_height + skip_rows);
+
+        let p = Paragraph::new(slice_lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll(((local_scroll_y as u16), 0));
+        f.render_widget(p, area);
+    }
 
     // 4. Scrollbar vertical sincronizado con max_scroll y la posición actual
     if max_scroll > 0 {
