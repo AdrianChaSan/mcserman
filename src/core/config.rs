@@ -20,6 +20,15 @@ impl std::fmt::Display for LoaderType {
     }
 }
 
+impl LoaderType {
+    pub fn addons_subfolder(&self) -> &'static str {
+        match self {
+            LoaderType::Paper => "plugins",
+            LoaderType::Fabric | LoaderType::Vanilla => "mods",
+        }
+    }
+}
+
 impl std::str::FromStr for LoaderType {
     type Err = anyhow::Error;
 
@@ -52,6 +61,8 @@ pub struct InstanceConfig {
     pub aikar_flags: bool,
     #[serde(default)]
     pub extra_jvm_args: Vec<String>,
+    #[serde(default)]
+    pub source_pack: Option<String>,
 }
 
 impl InstanceConfig {
@@ -77,6 +88,7 @@ impl InstanceConfig {
             eula: true,
             aikar_flags: true,
             extra_jvm_args: Vec::new(),
+            source_pack: None,
         }
     }
 
@@ -130,6 +142,10 @@ mod tests {
         assert_eq!("paper".parse::<LoaderType>().unwrap(), LoaderType::Paper);
         assert_eq!("fabric".parse::<LoaderType>().unwrap(), LoaderType::Fabric);
         assert!("forge".parse::<LoaderType>().is_err());
+
+        assert_eq!(LoaderType::Paper.addons_subfolder(), "plugins");
+        assert_eq!(LoaderType::Fabric.addons_subfolder(), "mods");
+        assert_eq!(LoaderType::Vanilla.addons_subfolder(), "mods");
     }
 
     #[test]

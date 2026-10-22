@@ -24,9 +24,13 @@ pub enum Action {
     ScrollLogUp(usize),
     ScrollLogDown(usize),
     ScrollLogBottom,
-    // Modrinth
-    SubmitModrinthSearch,
-    InstallSelectedMod,
+    // Gestor de Mods
+    OpenAddModModal,
+    CloseAddModModal,
+    SubmitAddModUrl,
+    PromptDeleteMod,
+    CancelDeleteMod,
+    ConfirmDeleteMod,
     // Propiedades
     ToggleProperty,
     CycleProperty(i8),
@@ -34,11 +38,20 @@ pub enum Action {
     StartEditProperty,
     CancelEditProperty,
     SubmitEditProperty,
+    StartPropertiesSearch,
+    CancelPropertiesSearch,
+    ConfirmPropertiesSearch,
+    TogglePropertiesShowAll,
     // Modal Creación
     OpenCreateModal,
     CloseCreateModal,
     NextWizardField,
     PrevWizardField,
     SelectWizardLoader(usize),
+    ResolveModpack,
     SubmitCreateInstance,
+    // Modal Eliminación
+    PromptDeleteInstance,
+    CancelDeleteInstance,
+    ConfirmDeleteInstance,
 }

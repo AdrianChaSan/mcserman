@@ -44,6 +44,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         inner[0],
         " Nombre identificador ",
         app.create_name_input.value(),
+        Some("mi-servidor"),
         app.create_field_idx == 0,
         theme,
         app.create_name_input.visual_cursor(),
@@ -58,23 +59,47 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme,
     );
 
-    // 2. Versión
-    draw_version_selector(
-        f,
-        inner[2],
-        &app.create_versions,
-        app.create_version_idx,
-        app.create_loading_versions,
-        app.create_field_idx == 2,
-        theme,
-    );
+    // 2. Versión o Modpack
+    if app.create_loader_idx == 3 {
+        let label_owned: String;
+        let label: &str = if app.create_modpack_resolving {
+            " Modpack / Serverpack (Consultando metadatos...) "
+        } else if let Some(ref st) = app.create_modpack_status {
+            label_owned = format!(" Modpack / Serverpack [{}] ", st);
+            &label_owned
+        } else {
+            " Modpack / Server Pack (CurseForge, Modrinth o .zip) "
+        };
+
+        draw_input_field(
+            f,
+            inner[2],
+            label,
+            app.create_modpack_input.value(),
+            Some("URL CurseForge, slug/ID Modrinth o enlace directo .zip"),
+            app.create_field_idx == 2,
+            theme,
+            app.create_modpack_input.visual_cursor(),
+        );
+    } else {
+        draw_version_selector(
+            f,
+            inner[2],
+            &app.create_versions,
+            app.create_version_idx,
+            app.create_loading_versions,
+            app.create_field_idx == 2,
+            theme,
+        );
+    }
 
     // 3. RAM
     draw_input_field(
         f,
         inner[3],
-        " Memoria RAM máxima (ej. 2G, 4G, 8G) ",
+        " Memoria RAM ",
         app.create_ram_input.value(),
+        Some("4G"),
         app.create_field_idx == 3,
         theme,
         app.create_ram_input.visual_cursor(),
@@ -84,8 +109,9 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     draw_input_field(
         f,
         inner[4],
-        " Puerto TCP del servidor ",
+        " Puerto ",
         app.create_port_input.value(),
+        Some("25565"),
         app.create_field_idx == 4,
         theme,
         app.create_port_input.visual_cursor(),
@@ -110,24 +136,27 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let hints = if app.input_mode == InputMode::Insert {
         Line::from(vec![
             Span::styled(" Esc: ", theme.accent),
-            Span::styled("Dejar de editar ", theme.muted),
-            Span::styled("│ ", theme.border),
-            Span::styled("Enter: ", theme.accent),
-            Span::styled("Confirmar ", theme.base),
+            Span::styled("Cancelar ", theme.muted),
             Span::styled("│ ", theme.border),
             Span::styled("Tab: ", theme.accent),
-            Span::styled("Siguiente", theme.base),
+            Span::styled("Siguiente ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("Enter: ", theme.accent),
+            Span::styled("Confirmar", theme.base),
         ])
     } else {
         Line::from(vec![
             Span::styled(" Esc: ", theme.accent),
-            Span::styled("Cerrar modal ", theme.muted),
-            Span::styled("│ ", theme.border),
-            Span::styled("i/Enter: ", theme.accent),
-            Span::styled("Editar ", theme.base),
+            Span::styled("Cerrar ", theme.muted),
             Span::styled("│ ", theme.border),
             Span::styled("Tab/↓: ", theme.accent),
             Span::styled("Siguiente ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("◄►: ", theme.accent),
+            Span::styled("Cambiar ", theme.base),
+            Span::styled("│ ", theme.border),
+            Span::styled("i: ", theme.accent),
+            Span::styled("Editar ", theme.base),
             Span::styled("│ ", theme.border),
             Span::styled("Enter: ", theme.accent),
             Span::styled("Crear", theme.highlight),
@@ -136,11 +165,13 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(Paragraph::new(hints), inner[6]);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_input_field(
     f: &mut Frame,
     area: Rect,
     label: &str,
     val: &str,
+    placeholder: Option<&str>,
     is_active: bool,
     theme: &Theme,
     cursor: usize,
@@ -156,7 +187,15 @@ fn draw_input_field(
         .style(Style::default().bg(Color::Rgb(18, 18, 24)))
         .title(label);
 
-    let p = Paragraph::new(format!(" {}", val)).block(block);
+    let p = if val.is_empty() {
+        if let Some(ph) = placeholder {
+            Paragraph::new(Span::styled(format!(" {}", ph), theme.muted)).block(block)
+        } else {
+            Paragraph::new(" ").block(block)
+        }
+    } else {
+        Paragraph::new(Span::styled(format!(" {}", val), theme.base)).block(block)
+    };
     f.render_widget(p, area);
 
     if is_active {
@@ -184,15 +223,18 @@ fn draw_loader_selector(
         .borders(Borders::ALL)
         .border_style(border_style)
         .style(Style::default().bg(Color::Rgb(18, 18, 24)))
-        .title(" Tipo de Servidor (Modloader) - Flechas ◄ ► ");
+        .title(" Tipo de Servidor ");
 
-    let loaders = ["Paper (Recomendado)", "Fabric (Mods)", "Vanilla"];
+    let loaders = ["Paper", "Fabric", "Vanilla", "Modpack"];
     let mut spans = vec![Span::raw(" ")];
     for (i, name) in loaders.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
         if i == selected_idx {
-            spans.push(Span::styled(format!(" [● {}] ", name), theme.accent));
+            spans.push(Span::styled(format!("[● {}]", name), theme.accent));
         } else {
-            spans.push(Span::styled(format!("  ○ {}  ", name), theme.muted));
+            spans.push(Span::styled(format!("○ {}", name), theme.muted));
         }
     }
 
@@ -218,7 +260,7 @@ fn draw_version_selector(
         .borders(Borders::ALL)
         .border_style(border_style)
         .style(Style::default().bg(Color::Rgb(18, 18, 24)))
-        .title(" Versión de Minecraft - Flechas ◄ ► ");
+        .title(" Versión de Minecraft ");
 
     let line = if is_loading {
         Line::from(Span::styled(

@@ -1,5 +1,3 @@
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -124,62 +122,6 @@ impl ProgressReporter for ChannelProgressReporter {
         let _ = self
             .sender
             .try_send(ProgressUpdate::Error(error.to_string()));
-    }
-}
-
-/// Reporter para la CLI tradicional con `indicatif` y `colored`.
-pub struct CliProgressReporter {
-    pb: Mutex<Option<ProgressBar>>,
-}
-
-impl Default for CliProgressReporter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CliProgressReporter {
-    pub fn new() -> Self {
-        Self {
-            pb: Mutex::new(None),
-        }
-    }
-}
-
-impl ProgressReporter for CliProgressReporter {
-    fn on_info(&self, message: &str) {
-        println!("{}", message.cyan());
-    }
-
-    fn on_start(&self, title: &str, total_bytes: u64) {
-        let pb = ProgressBar::new(total_bytes);
-        if let Ok(style) = ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-        {
-            pb.set_style(style.progress_chars("#>-"));
-        }
-        pb.set_message(title.to_string());
-        *self.pb.lock().unwrap() = Some(pb);
-    }
-
-    fn on_progress(&self, current_bytes: u64, _total_bytes: u64) {
-        if let Some(pb) = self.pb.lock().unwrap().as_ref() {
-            pb.set_position(current_bytes);
-        }
-    }
-
-    fn on_finish(&self, message: &str) {
-        if let Some(pb) = self.pb.lock().unwrap().take() {
-            pb.finish_and_clear();
-        }
-        println!("{}", format!("✓ {}", message).green());
-    }
-
-    fn on_error(&self, error: &str) {
-        if let Some(pb) = self.pb.lock().unwrap().take() {
-            pb.finish_and_clear();
-        }
-        eprintln!("{}", format!("✗ {}", error).red());
     }
 }
 

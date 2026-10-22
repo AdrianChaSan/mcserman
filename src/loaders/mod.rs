@@ -1,5 +1,6 @@
 pub mod fabric;
 pub mod paper;
+pub mod serverpack;
 pub mod vanilla;
 
 use crate::core::config::LoaderType;

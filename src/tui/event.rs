@@ -14,12 +14,11 @@ pub enum AppEvent {
     Progress(ProgressUpdate),
     InstanceStatusChanged { name: String, state: ServerState },
     LogLineReceived { instance: String, line: String },
-    ModrinthSearchResults(Vec<crate::modrinth::api::SearchHit>),
-    ModrinthSearchError(String),
-    ModrinthInstalled(String),
     VersionsLoaded(Vec<String>),
     VersionsLoadError(String),
+    ModpackResolved(Box<Result<crate::modrinth::modpack::ResolvedModpack, String>>),
     InstanceCreated(Result<String, String>),
+    AddModCompleted(Result<String, String>),
     StatusMessage(String),
 }
 

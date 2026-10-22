@@ -30,6 +30,10 @@ impl ServerProperties {
         self.properties.get(key).map(|s| s.as_str())
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.properties.iter()
+    }
+
     pub fn set(&mut self, key: &str, value: &str) {
         self.properties.insert(key.to_string(), value.to_string());
     }

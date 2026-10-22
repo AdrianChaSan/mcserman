@@ -1,4 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::widgets::ListState;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::Instant;
 use tui_input::backend::crossterm::EventHandler;
@@ -8,7 +10,6 @@ use crate::core::config::{InstanceConfig, LoaderType};
 use crate::core::paths::SystemPaths;
 use crate::core::properties::ServerProperties;
 use crate::daemon::socket::{is_daemon_running, send_request, SocketRequest, SocketResponse};
-use crate::modrinth::api::SearchHit;
 use crate::tui::action::Action;
 
 pub const MAX_LOG_LINES: usize = 1000;
@@ -39,10 +40,16 @@ impl AppTab {
         match self {
             AppTab::Dashboard => "1. Servidor",
             AppTab::Console => "2. Consola",
-            AppTab::Modrinth => "3. Modrinth",
+            AppTab::Modrinth => "3. Mods",
             AppTab::Settings => "4. Opciones",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct InstalledMod {
+    pub file_name: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +74,24 @@ pub struct InstanceSummary {
     pub ram: String,
     pub port: u16,
     pub state: ServerState,
+    pub source_pack: Option<String>,
+}
+
+impl InstanceSummary {
+    pub fn addons_subfolder(&self) -> &'static str {
+        self.loader
+            .parse::<LoaderType>()
+            .map(|l| l.addons_subfolder())
+            .unwrap_or_else(|_| {
+                if self.loader.eq_ignore_ascii_case("paper")
+                    || self.loader.eq_ignore_ascii_case("purpur")
+                {
+                    "plugins"
+                } else {
+                    "mods"
+                }
+            })
+    }
 }
 
 /// Sanitiza líneas crudas de consola eliminando secuencias ANSI de control,
@@ -205,6 +230,7 @@ pub struct App {
     pub focus: Focus,
     pub instances: Vec<InstanceSummary>,
     pub selected_instance: usize,
+    pub instances_list_state: RefCell<ListState>,
     pub paths: SystemPaths,
     pub status_message: Option<(String, Instant)>,
     pub terminal_size: (u16, u16),
@@ -219,32 +245,50 @@ pub struct App {
     pub log_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     pub log_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>,
 
-    // Modrinth
-    pub modrinth_input: Input,
-    pub modrinth_hits: Vec<SearchHit>,
-    pub selected_mod_hit: usize,
-    pub modrinth_loading: bool,
+    // Gestor de Mods (Tab 3)
     pub modrinth_progress: Option<(f64, String)>,
-    pub modrinth_error: Option<String>,
+    pub installed_mods: Vec<InstalledMod>,
+    pub selected_installed_mod: usize,
+    pub installed_mods_state: RefCell<ListState>,
+    pub show_add_mod_modal: bool,
+    pub add_mod_input: Input,
+    pub add_mod_loading: bool,
+    pub add_mod_error: Option<String>,
+    pub show_delete_mod_modal: bool,
+    pub delete_mod_filename: Option<String>,
 
     // Propiedades
     pub properties_list: Vec<(String, String)>,
     pub selected_property: usize,
+    pub properties_list_state: RefCell<ListState>,
     pub properties_dirty: bool,
     pub editing_property: Option<Input>,
+    pub editing_property_key: Option<String>,
+    pub properties_search_input: Input,
+    pub properties_search_active: bool,
+    pub properties_show_all: bool,
 
     // Modal de Creación
     pub show_create_modal: bool,
-    pub create_field_idx: usize, // 0: Name, 1: Loader, 2: Version, 3: RAM, 4: Port
+    pub create_field_idx: usize, // 0: Name, 1: Loader, 2: Version/Modpack, 3: RAM, 4: Port
     pub create_name_input: Input,
-    pub create_loader_idx: usize, // 0: Paper, 1: Fabric, 2: Vanilla
+    pub create_loader_idx: usize, // 0: Paper, 1: Fabric, 2: Vanilla, 3: Modpack
     pub create_versions: Vec<String>,
     pub create_version_idx: usize,
     pub create_loading_versions: bool,
+    pub create_modpack_input: Input,
+    pub create_modpack_resolving: bool,
+    pub create_modpack_status: Option<String>,
+    pub resolved_modpack: Option<crate::modrinth::modpack::ResolvedModpack>,
     pub create_ram_input: Input,
     pub create_port_input: Input,
     pub create_progress: Option<(f64, String)>,
     pub create_error: Option<String>,
+    pub create_input_backup: Option<String>,
+
+    // Modal de Eliminación
+    pub show_delete_modal: bool,
+    pub delete_server_name: Option<String>,
 }
 
 impl App {
@@ -257,6 +301,7 @@ impl App {
             focus: Focus::Sidebar,
             instances: Vec::new(),
             selected_instance: 0,
+            instances_list_state: RefCell::new(ListState::default()),
             paths,
             status_message: None,
             terminal_size: (80, 24),
@@ -271,19 +316,28 @@ impl App {
             log_tx,
             log_rx: Some(log_rx),
 
-            // Modrinth
-            modrinth_input: Input::default(),
-            modrinth_hits: Vec::new(),
-            selected_mod_hit: 0,
-            modrinth_loading: false,
+            // Gestor de Mods
             modrinth_progress: None,
-            modrinth_error: None,
+            installed_mods: Vec::new(),
+            selected_installed_mod: 0,
+            installed_mods_state: RefCell::new(ListState::default()),
+            show_add_mod_modal: false,
+            add_mod_input: Input::default(),
+            add_mod_loading: false,
+            add_mod_error: None,
+            show_delete_mod_modal: false,
+            delete_mod_filename: None,
 
             // Propiedades
             properties_list: Vec::new(),
             selected_property: 0,
+            properties_list_state: RefCell::new(ListState::default()),
             properties_dirty: false,
             editing_property: None,
+            editing_property_key: None,
+            properties_search_input: Input::default(),
+            properties_search_active: false,
+            properties_show_all: false,
 
             // Modal de Creación
             show_create_modal: false,
@@ -293,13 +347,23 @@ impl App {
             create_versions: Vec::new(),
             create_version_idx: 0,
             create_loading_versions: false,
+            create_modpack_input: Input::default(),
+            create_modpack_resolving: false,
+            create_modpack_status: None,
+            resolved_modpack: None,
             create_ram_input: Input::new("4G".to_string()),
             create_port_input: Input::new("25565".to_string()),
             create_progress: None,
             create_error: None,
+            create_input_backup: None,
+
+            // Modal de Eliminación
+            show_delete_modal: false,
+            delete_server_name: None,
         };
         app.reload_instances();
         app.load_properties_for_selected();
+        app.load_installed_mods();
         app
     }
 
@@ -324,6 +388,7 @@ impl App {
                             ram: cfg.ram_max,
                             port: cfg.port,
                             state: existing_state,
+                            source_pack: cfg.source_pack,
                         });
                     }
                 }
@@ -393,6 +458,63 @@ impl App {
 
     pub fn selected(&self) -> Option<&InstanceSummary> {
         self.instances.get(self.selected_instance)
+    }
+
+    pub fn is_selected_serverpack(&self) -> bool {
+        if let Some(inst) = self.selected() {
+            if inst.source_pack.is_some() {
+                return true;
+            }
+            let inst_dir = self.paths.instance_dir(&inst.name);
+            if inst_dir.join("variables.txt").exists() {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn load_installed_mods(&mut self) {
+        let (inst_name, subfolder) = match self.selected() {
+            Some(i) => (i.name.clone(), i.addons_subfolder()),
+            None => {
+                self.installed_mods.clear();
+                self.selected_installed_mod = 0;
+                *self.installed_mods_state.borrow_mut() = ListState::default();
+                return;
+            }
+        };
+
+        let dir = self.paths.instance_dir(&inst_name).join(subfolder);
+        let mut list = Vec::new();
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with(".jar") {
+                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                list.push(InstalledMod {
+                                    file_name: name.to_string(),
+                                    size_bytes: size,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        list.sort_by_key(|a| a.file_name.to_lowercase());
+        self.installed_mods = list;
+        if self.installed_mods.is_empty() {
+            self.selected_installed_mod = 0;
+            *self.installed_mods_state.borrow_mut() = ListState::default();
+        } else if self.selected_installed_mod >= self.installed_mods.len() {
+            self.selected_installed_mod = self.installed_mods.len() - 1;
+            self.installed_mods_state
+                .borrow_mut()
+                .select(Some(self.selected_installed_mod));
+        }
     }
 
     pub fn set_status(&mut self, msg: &str) {
@@ -560,6 +682,11 @@ impl App {
         self.properties_list.clear();
         self.properties_dirty = false;
         self.selected_property = 0;
+        self.editing_property = None;
+        self.editing_property_key = None;
+        self.properties_search_input.reset();
+        self.properties_search_active = false;
+        self.properties_show_all = false;
 
         let name = match self.selected() {
             Some(i) => i.name.clone(),
@@ -568,23 +695,41 @@ impl App {
         let props_path = self.paths.instance_dir(&name).join("server.properties");
         let props = ServerProperties::load_or_default(&props_path);
 
-        // Claves esenciales recomendadas
-        let keys = [
-            "motd",
-            "server-port",
-            "difficulty",
-            "gamemode",
-            "max-players",
-            "online-mode",
-            "pvp",
-            "white-list",
-            "allow-flight",
-            "view-distance",
-        ];
-
-        for k in keys {
+        let mut seen = std::collections::HashSet::new();
+        for &k in COMMON_PROPERTY_KEYS {
             let val = props.get(k).unwrap_or("").to_string();
             self.properties_list.push((k.to_string(), val));
+            seen.insert(k);
+        }
+        for (k, v) in props.iter() {
+            if !seen.contains(k.as_str()) {
+                self.properties_list.push((k.clone(), v.clone()));
+            }
+        }
+    }
+
+    pub fn filtered_properties(&self) -> Vec<(usize, &(String, String))> {
+        let query = self.properties_search_input.value().trim().to_lowercase();
+        if query.is_empty() {
+            if self.properties_show_all {
+                self.properties_list.iter().enumerate().collect()
+            } else {
+                let common_set: std::collections::HashSet<&str> =
+                    COMMON_PROPERTY_KEYS.iter().copied().collect();
+                self.properties_list
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (k, _))| common_set.contains(k.as_str()))
+                    .collect()
+            }
+        } else {
+            self.properties_list
+                .iter()
+                .enumerate()
+                .filter(|(_, (k, v))| {
+                    k.to_lowercase().contains(&query) || v.to_lowercase().contains(&query)
+                })
+                .collect()
         }
     }
 
@@ -605,6 +750,25 @@ impl App {
     }
 }
 
+pub const COMMON_PROPERTY_KEYS: &[&str] = &[
+    "motd",
+    "server-port",
+    "difficulty",
+    "gamemode",
+    "max-players",
+    "online-mode",
+    "pvp",
+    "white-list",
+    "allow-flight",
+    "view-distance",
+    "simulation-distance",
+    "level-name",
+    "allow-nether",
+    "hardcore",
+    "level-seed",
+    "spawn-protection",
+];
+
 pub fn is_boolean_property(k: &str, v: &str) -> bool {
     v == "true"
         || v == "false"
@@ -614,6 +778,7 @@ pub fn is_boolean_property(k: &str, v: &str) -> bool {
                 | "pvp"
                 | "white-list"
                 | "allow-flight"
+                | "allow-nether"
                 | "enable-command-block"
                 | "spawn-animals"
                 | "spawn-monsters"
@@ -633,7 +798,17 @@ pub fn is_enum_property(k: &str) -> bool {
 
 impl App {
     pub fn toggle_selected_property(&mut self) {
-        if let Some((k, v)) = self.properties_list.get_mut(self.selected_property) {
+        let filtered = self.filtered_properties();
+        let target_key = match filtered.get(self.selected_property) {
+            Some(&(_, (k, _))) => k.clone(),
+            None => return,
+        };
+
+        if let Some((k, v)) = self
+            .properties_list
+            .iter_mut()
+            .find(|(k, _)| k == &target_key)
+        {
             if is_boolean_property(k, v) {
                 *v = if v == "true" {
                     "false".to_string()
@@ -663,28 +838,170 @@ impl App {
 
     /// Manejo de teclas desacoplado con máquina de estados estricta (Rule 1).
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Si la búsqueda en propiedades (Tab 4) está activa
+        if self.properties_search_active {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(Action::Quit),
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    return Some(Action::CancelPropertiesSearch);
+                }
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    return Some(Action::ConfirmPropertiesSearch);
+                }
+                _ => {
+                    self.properties_search_input
+                        .handle_event(&crossterm::event::Event::Key(key));
+                    self.selected_property = 0;
+                    return None;
+                }
+            }
+        }
+
+        // Si el modal de confirmación de eliminación de instancia está abierto
+        if self.show_delete_modal {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(Action::Quit),
+                (m, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    if !m.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Some(Action::ConfirmDeleteInstance);
+                }
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    return Some(Action::ConfirmDeleteInstance);
+                }
+                (m, KeyCode::Char('n') | KeyCode::Char('N'))
+                    if !m.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Some(Action::CancelDeleteInstance);
+                }
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    return Some(Action::CancelDeleteInstance);
+                }
+                _ => return None,
+            }
+        }
+
+        // Si el modal de confirmación de eliminación de MOD está abierto
+        if self.show_delete_mod_modal {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(Action::Quit),
+                (m, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    if !m.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Some(Action::ConfirmDeleteMod);
+                }
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    return Some(Action::ConfirmDeleteMod);
+                }
+                (m, KeyCode::Char('n') | KeyCode::Char('N'))
+                    if !m.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Some(Action::CancelDeleteMod);
+                }
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    return Some(Action::CancelDeleteMod);
+                }
+                _ => return None,
+            }
+        }
+
+        // Si el modal de añadir mod vía URL/Slug está abierto
+        if self.show_add_mod_modal {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Some(Action::Quit),
+                (KeyModifiers::NONE, KeyCode::Esc) => return Some(Action::CloseAddModModal),
+                (KeyModifiers::NONE, KeyCode::Enter) => return Some(Action::SubmitAddModUrl),
+                _ => {
+                    self.add_mod_input
+                        .handle_event(&crossterm::event::Event::Key(key));
+                    return None;
+                }
+            }
+        }
+
         // Si el modal de creación está abierto
         if self.show_create_modal {
             if self.input_mode == InputMode::Insert {
                 match (key.modifiers, key.code) {
                     (KeyModifiers::NONE, KeyCode::Esc) => {
+                        // Cancelar edición: restaurar valor previo si existe
+                        if let Some(prev) = self.create_input_backup.take() {
+                            match self.create_field_idx {
+                                0 => self.create_name_input = tui_input::Input::new(prev),
+                                2 => {
+                                    if self.create_loader_idx == 3 {
+                                        self.create_modpack_input = tui_input::Input::new(prev);
+                                    }
+                                }
+                                3 => self.create_ram_input = tui_input::Input::new(prev),
+                                4 => self.create_port_input = tui_input::Input::new(prev),
+                                _ => {}
+                            }
+                        }
                         self.input_mode = InputMode::Normal;
                         return None;
                     }
                     (KeyModifiers::NONE, KeyCode::Enter) => {
+                        // Confirmar edición y volver a modo navegación del modal
+                        self.create_input_backup = None;
                         self.input_mode = InputMode::Normal;
+                        if self.create_loader_idx == 3 && self.create_field_idx == 2 {
+                            return Some(Action::ResolveModpack);
+                        }
                         return None;
                     }
                     (KeyModifiers::NONE, KeyCode::Tab) => {
+                        self.create_input_backup = None;
+                        let prev = self.create_field_idx;
                         self.create_field_idx = (self.create_field_idx + 1) % 5;
+                        if self.create_loader_idx == 3 && prev == 2 {
+                            return Some(Action::ResolveModpack);
+                        }
+                        let is_text = if self.create_loader_idx == 3 {
+                            matches!(self.create_field_idx, 0 | 2 | 3 | 4)
+                        } else {
+                            matches!(self.create_field_idx, 0 | 3 | 4)
+                        };
+                        if is_text {
+                            self.create_input_backup = Some(match self.create_field_idx {
+                                0 => self.create_name_input.value().to_string(),
+                                2 => self.create_modpack_input.value().to_string(),
+                                3 => self.create_ram_input.value().to_string(),
+                                4 => self.create_port_input.value().to_string(),
+                                _ => String::new(),
+                            });
+                        } else {
+                            self.input_mode = InputMode::Normal;
+                        }
                         return None;
                     }
                     (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                        self.create_input_backup = None;
+                        let prev = self.create_field_idx;
                         self.create_field_idx = if self.create_field_idx == 0 {
                             4
                         } else {
                             self.create_field_idx - 1
                         };
+                        if self.create_loader_idx == 3 && prev == 2 {
+                            return Some(Action::ResolveModpack);
+                        }
+                        let is_text = if self.create_loader_idx == 3 {
+                            matches!(self.create_field_idx, 0 | 2 | 3 | 4)
+                        } else {
+                            matches!(self.create_field_idx, 0 | 3 | 4)
+                        };
+                        if is_text {
+                            self.create_input_backup = Some(match self.create_field_idx {
+                                0 => self.create_name_input.value().to_string(),
+                                2 => self.create_modpack_input.value().to_string(),
+                                3 => self.create_ram_input.value().to_string(),
+                                4 => self.create_port_input.value().to_string(),
+                                _ => String::new(),
+                            });
+                        } else {
+                            self.input_mode = InputMode::Normal;
+                        }
                         return None;
                     }
                     _ => {
@@ -692,6 +1009,14 @@ impl App {
                             0 => {
                                 self.create_name_input
                                     .handle_event(&crossterm::event::Event::Key(key));
+                            }
+                            2 => {
+                                if self.create_loader_idx == 3 {
+                                    self.create_modpack_input
+                                        .handle_event(&crossterm::event::Event::Key(key));
+                                    self.resolved_modpack = None;
+                                    self.create_modpack_status = None;
+                                }
                             }
                             3 => {
                                 self.create_ram_input
@@ -710,6 +1035,7 @@ impl App {
                 // Modo Normal dentro del modal
                 match (key.modifiers, key.code) {
                     (KeyModifiers::NONE, KeyCode::Esc) => {
+                        self.create_input_backup = None;
                         return Some(Action::CloseCreateModal);
                     }
                     (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Down) => {
@@ -719,10 +1045,23 @@ impl App {
                         return Some(Action::PrevWizardField);
                     }
                     (KeyModifiers::NONE, KeyCode::Enter) => {
+                        self.create_input_backup = None;
                         return Some(Action::SubmitCreateInstance);
                     }
                     (KeyModifiers::NONE, KeyCode::Char('i')) => {
-                        if matches!(self.create_field_idx, 0 | 3 | 4) {
+                        let is_text = if self.create_loader_idx == 3 {
+                            matches!(self.create_field_idx, 0 | 2 | 3 | 4)
+                        } else {
+                            matches!(self.create_field_idx, 0 | 3 | 4)
+                        };
+                        if is_text {
+                            self.create_input_backup = Some(match self.create_field_idx {
+                                0 => self.create_name_input.value().to_string(),
+                                2 => self.create_modpack_input.value().to_string(),
+                                3 => self.create_ram_input.value().to_string(),
+                                4 => self.create_port_input.value().to_string(),
+                                _ => String::new(),
+                            });
                             self.input_mode = InputMode::Insert;
                         }
                         return None;
@@ -732,20 +1071,20 @@ impl App {
                             match key.code {
                                 KeyCode::Left => {
                                     let prev = if self.create_loader_idx == 0 {
-                                        2
+                                        3
                                     } else {
                                         self.create_loader_idx - 1
                                     };
                                     return Some(Action::SelectWizardLoader(prev));
                                 }
                                 KeyCode::Right => {
-                                    let next = (self.create_loader_idx + 1) % 3;
+                                    let next = (self.create_loader_idx + 1) % 4;
                                     return Some(Action::SelectWizardLoader(next));
                                 }
                                 _ => {}
                             }
                         }
-                        if self.create_field_idx == 2 {
+                        if self.create_field_idx == 2 && self.create_loader_idx != 3 {
                             match key.code {
                                 KeyCode::Left => {
                                     if !self.create_versions.is_empty()
@@ -766,26 +1105,6 @@ impl App {
                                 _ => {}
                             }
                         }
-                        if matches!(self.create_field_idx, 0 | 3 | 4) {
-                            if let KeyCode::Char(_) = key.code {
-                                self.input_mode = InputMode::Insert;
-                                match self.create_field_idx {
-                                    0 => {
-                                        self.create_name_input
-                                            .handle_event(&crossterm::event::Event::Key(key));
-                                    }
-                                    3 => {
-                                        self.create_ram_input
-                                            .handle_event(&crossterm::event::Event::Key(key));
-                                    }
-                                    4 => {
-                                        self.create_port_input
-                                            .handle_event(&crossterm::event::Event::Key(key));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
                         return None;
                     }
                 }
@@ -804,7 +1123,6 @@ impl App {
                 }
                 (KeyModifiers::NONE, KeyCode::Enter) => match self.active_tab {
                     AppTab::Console => Some(Action::SubmitConsoleCommand),
-                    AppTab::Modrinth => Some(Action::SubmitModrinthSearch),
                     AppTab::Settings => {
                         if self.editing_property.is_some() {
                             Some(Action::SubmitEditProperty)
@@ -826,10 +1144,6 @@ impl App {
                     match self.active_tab {
                         AppTab::Console => {
                             self.console_input
-                                .handle_event(&crossterm::event::Event::Key(key));
-                        }
-                        AppTab::Modrinth => {
-                            self.modrinth_input
                                 .handle_event(&crossterm::event::Event::Key(key));
                         }
                         AppTab::Settings => {
@@ -867,6 +1181,47 @@ impl App {
                 (KeyModifiers::NONE, KeyCode::Char('4')) => Some(Action::GoToTab(3)),
                 (KeyModifiers::NONE, KeyCode::Char('r')) => Some(Action::RefreshInstances),
                 (KeyModifiers::NONE, KeyCode::Char('n')) => Some(Action::OpenCreateModal),
+                (KeyModifiers::NONE, KeyCode::Char('u')) => {
+                    if self.active_tab == AppTab::Modrinth {
+                        Some(Action::OpenAddModModal)
+                    } else {
+                        None
+                    }
+                }
+                (KeyModifiers::NONE, KeyCode::Char('d'))
+                | (KeyModifiers::NONE, KeyCode::Char('x'))
+                | (KeyModifiers::NONE, KeyCode::Delete) => {
+                    if self.focus == Focus::Sidebar || self.active_tab == AppTab::Dashboard {
+                        Some(Action::PromptDeleteInstance)
+                    } else if self.active_tab == AppTab::Modrinth {
+                        Some(Action::PromptDeleteMod)
+                    } else {
+                        None
+                    }
+                }
+                (KeyModifiers::NONE, KeyCode::Char('/')) => {
+                    if self.active_tab == AppTab::Settings {
+                        Some(Action::StartPropertiesSearch)
+                    } else {
+                        None
+                    }
+                }
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    if self.active_tab == AppTab::Settings
+                        && !self.properties_search_input.value().is_empty()
+                    {
+                        Some(Action::CancelPropertiesSearch)
+                    } else {
+                        None
+                    }
+                }
+                (KeyModifiers::NONE, KeyCode::Char('a')) => {
+                    if self.active_tab == AppTab::Settings {
+                        Some(Action::TogglePropertiesShowAll)
+                    } else {
+                        None
+                    }
+                }
                 (KeyModifiers::NONE, KeyCode::Char(' ')) => {
                     if self.focus == Focus::MainPanel && self.active_tab == AppTab::Settings {
                         Some(Action::ToggleProperty)
@@ -875,10 +1230,14 @@ impl App {
                     }
                 }
                 (KeyModifiers::NONE, KeyCode::Char('i')) => match self.active_tab {
-                    AppTab::Console | AppTab::Modrinth => {
+                    AppTab::Console => {
                         self.focus = Focus::MainPanel;
                         self.input_mode = InputMode::Insert;
                         None
+                    }
+                    AppTab::Modrinth => {
+                        self.focus = Focus::MainPanel;
+                        Some(Action::OpenAddModModal)
                     }
                     AppTab::Settings => {
                         self.focus = Focus::MainPanel;
@@ -893,11 +1252,10 @@ impl App {
                                 self.input_mode = InputMode::Insert;
                                 None
                             }
-                            AppTab::Modrinth => Some(Action::InstallSelectedMod),
+                            AppTab::Modrinth => None,
                             AppTab::Settings => {
-                                if let Some((k, v)) =
-                                    self.properties_list.get(self.selected_property)
-                                {
+                                let filtered = self.filtered_properties();
+                                if let Some(&(_, (k, v))) = filtered.get(self.selected_property) {
                                     if is_boolean_property(k, v) || is_enum_property(k) {
                                         Some(Action::ToggleProperty)
                                     } else {
@@ -980,19 +1338,24 @@ impl App {
                         }
                         return;
                     }
-                    if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
-                        if self.selected_property > 0 {
-                            self.selected_property -= 1;
-                        } else {
-                            self.selected_property = self.properties_list.len() - 1;
+                    if self.active_tab == AppTab::Settings {
+                        let count = self.filtered_properties().len();
+                        if count > 0 {
+                            if self.selected_property > 0 {
+                                self.selected_property -= 1;
+                            } else {
+                                self.selected_property = count - 1;
+                            }
+                            return;
                         }
-                        return;
                     }
-                    if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
-                        if self.selected_mod_hit > 0 {
-                            self.selected_mod_hit -= 1;
-                        } else {
-                            self.selected_mod_hit = self.modrinth_hits.len() - 1;
+                    if self.active_tab == AppTab::Modrinth {
+                        if !self.installed_mods.is_empty() {
+                            if self.selected_installed_mod > 0 {
+                                self.selected_installed_mod -= 1;
+                            } else {
+                                self.selected_installed_mod = self.installed_mods.len() - 1;
+                            }
                         }
                         return;
                     }
@@ -1011,7 +1374,10 @@ impl App {
                         self.auto_scroll = true;
                         self.active_console_instance = None;
                         self.start_console_stream();
+                        self.selected_installed_mod = 0;
+                        *self.installed_mods_state.borrow_mut() = ListState::default();
                         self.load_properties_for_selected();
+                        self.load_installed_mods();
                     }
                 }
             }
@@ -1019,26 +1385,31 @@ impl App {
                 if self.focus == Focus::MainPanel {
                     if self.active_tab == AppTab::Console {
                         let max_scroll = self.console_max_scroll();
-                        self.console_scroll =
-                            self.console_scroll.min(max_scroll).saturating_sub(1);
+                        self.console_scroll = self.console_scroll.min(max_scroll).saturating_sub(1);
                         if self.console_scroll == 0 {
                             self.auto_scroll = true;
                         }
                         return;
                     }
-                    if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
-                        if self.selected_property + 1 < self.properties_list.len() {
-                            self.selected_property += 1;
-                        } else {
-                            self.selected_property = 0;
+                    if self.active_tab == AppTab::Settings {
+                        let count = self.filtered_properties().len();
+                        if count > 0 {
+                            if self.selected_property + 1 < count {
+                                self.selected_property += 1;
+                            } else {
+                                self.selected_property = 0;
+                            }
+                            return;
                         }
-                        return;
                     }
-                    if self.active_tab == AppTab::Modrinth && !self.modrinth_hits.is_empty() {
-                        if self.selected_mod_hit + 1 < self.modrinth_hits.len() {
-                            self.selected_mod_hit += 1;
-                        } else {
-                            self.selected_mod_hit = 0;
+                    if self.active_tab == AppTab::Modrinth {
+                        if !self.installed_mods.is_empty() {
+                            if self.selected_installed_mod + 1 < self.installed_mods.len() {
+                                self.selected_installed_mod += 1;
+                            } else {
+                                self.selected_installed_mod = 0;
+                                *self.installed_mods_state.borrow_mut() = ListState::default();
+                            }
                         }
                         return;
                     }
@@ -1057,12 +1428,16 @@ impl App {
                         self.auto_scroll = true;
                         self.active_console_instance = None;
                         self.start_console_stream();
+                        self.selected_installed_mod = 0;
+                        *self.installed_mods_state.borrow_mut() = ListState::default();
                         self.load_properties_for_selected();
+                        self.load_installed_mods();
                     }
                 }
             }
             Action::NextTab => {
                 self.clear_status();
+                self.properties_search_active = false;
                 let idx = self.active_tab as usize;
                 let next = (idx + 1) % AppTab::ALL.len();
                 self.active_tab = AppTab::ALL[next];
@@ -1072,10 +1447,13 @@ impl App {
                 };
                 if self.active_tab == AppTab::Console {
                     self.start_console_stream();
+                } else if self.active_tab == AppTab::Modrinth {
+                    self.load_installed_mods();
                 }
             }
             Action::PrevTab => {
                 self.clear_status();
+                self.properties_search_active = false;
                 let idx = self.active_tab as usize;
                 let prev = if idx == 0 {
                     AppTab::ALL.len() - 1
@@ -1089,10 +1467,13 @@ impl App {
                 };
                 if self.active_tab == AppTab::Console {
                     self.start_console_stream();
+                } else if self.active_tab == AppTab::Modrinth {
+                    self.load_installed_mods();
                 }
             }
             Action::GoToTab(idx) => {
                 self.clear_status();
+                self.properties_search_active = false;
                 if idx < AppTab::ALL.len() {
                     self.active_tab = AppTab::ALL[idx];
                     self.focus = match self.active_tab {
@@ -1101,29 +1482,59 @@ impl App {
                     };
                     if self.active_tab == AppTab::Console {
                         self.start_console_stream();
+                    } else if self.active_tab == AppTab::Modrinth {
+                        self.load_installed_mods();
                     }
                 }
             }
             Action::StartEditProperty => {
-                if self.active_tab == AppTab::Settings && !self.properties_list.is_empty() {
-                    let val = self.properties_list[self.selected_property].1.clone();
-                    self.editing_property = Some(Input::new(val));
-                    self.input_mode = InputMode::Insert;
+                if self.active_tab == AppTab::Settings {
+                    let to_edit = self
+                        .filtered_properties()
+                        .get(self.selected_property)
+                        .map(|&(_, (k, v))| (k.clone(), v.clone()));
+                    if let Some((k, v)) = to_edit {
+                        self.editing_property_key = Some(k);
+                        self.editing_property = Some(Input::new(v));
+                        self.input_mode = InputMode::Insert;
+                    }
                 }
             }
             Action::CancelEditProperty => {
                 self.editing_property = None;
+                self.editing_property_key = None;
                 self.input_mode = InputMode::Normal;
             }
             Action::SubmitEditProperty => {
-                if let Some(input) = self.editing_property.take() {
+                if let (Some(input), Some(key)) = (
+                    self.editing_property.take(),
+                    self.editing_property_key.take(),
+                ) {
                     let new_val = input.value().to_string();
-                    if let Some((_, v)) = self.properties_list.get_mut(self.selected_property) {
+                    if let Some((_, v)) = self.properties_list.iter_mut().find(|(k, _)| k == &key) {
                         *v = new_val;
                         self.properties_dirty = true;
                     }
                 }
                 self.input_mode = InputMode::Normal;
+            }
+            Action::StartPropertiesSearch => {
+                self.properties_search_active = true;
+            }
+            Action::CancelPropertiesSearch => {
+                self.properties_search_active = false;
+                self.properties_search_input.reset();
+                self.selected_property = 0;
+            }
+            Action::ConfirmPropertiesSearch => {
+                self.properties_search_active = false;
+                self.selected_property = 0;
+            }
+            Action::TogglePropertiesShowAll => {
+                if self.active_tab == AppTab::Settings {
+                    self.properties_show_all = !self.properties_show_all;
+                    self.selected_property = 0;
+                }
             }
             Action::RefreshInstances => {
                 self.reload_instances();
@@ -1160,11 +1571,57 @@ impl App {
                 self.console_scroll = 0;
                 self.auto_scroll = true;
             }
-            Action::SubmitModrinthSearch => {
-                self.execute_modrinth_search(event_tx);
+            Action::OpenAddModModal => {
+                self.show_add_mod_modal = true;
+                self.input_mode = InputMode::Insert;
+                self.add_mod_input.reset();
+                self.add_mod_error = None;
+                self.add_mod_loading = false;
             }
-            Action::InstallSelectedMod => {
-                self.execute_install_mod(event_tx);
+            Action::CloseAddModModal => {
+                self.show_add_mod_modal = false;
+                self.input_mode = InputMode::Normal;
+                self.add_mod_error = None;
+                self.add_mod_loading = false;
+            }
+            Action::SubmitAddModUrl => {
+                self.execute_add_mod(event_tx);
+            }
+            Action::PromptDeleteMod => {
+                if !self.installed_mods.is_empty() {
+                    if let Some(item) = self.installed_mods.get(self.selected_installed_mod) {
+                        self.delete_mod_filename = Some(item.file_name.clone());
+                        self.show_delete_mod_modal = true;
+                    }
+                }
+            }
+            Action::CancelDeleteMod => {
+                self.show_delete_mod_modal = false;
+                self.delete_mod_filename = None;
+            }
+            Action::ConfirmDeleteMod => {
+                self.show_delete_mod_modal = false;
+                if let Some(filename) = self.delete_mod_filename.take() {
+                    if let Some(inst) = self.selected() {
+                        let subfolder = inst.addons_subfolder();
+                        let path = self
+                            .paths
+                            .instance_dir(&inst.name)
+                            .join(subfolder)
+                            .join(&filename);
+                        if path.exists() {
+                            if let Err(e) = std::fs::remove_file(&path) {
+                                self.set_status(&format!("Error al eliminar {}: {}", filename, e));
+                            } else {
+                                self.set_status(&format!(
+                                    "✓ Mod '{}' eliminado correctamente",
+                                    filename
+                                ));
+                                self.load_installed_mods();
+                            }
+                        }
+                    }
+                }
             }
             Action::ToggleProperty => {
                 self.toggle_selected_property();
@@ -1174,37 +1631,85 @@ impl App {
             }
             Action::OpenCreateModal => {
                 self.show_create_modal = true;
-                self.input_mode = InputMode::Insert;
+                self.input_mode = InputMode::Normal;
+                self.create_input_backup = None;
                 self.create_field_idx = 0;
                 self.create_error = None;
                 self.create_progress = None;
+                self.create_name_input = Input::default();
+                self.create_modpack_input = Input::default();
+                self.create_modpack_resolving = false;
+                self.create_modpack_status = None;
+                self.resolved_modpack = None;
+                self.create_ram_input = Input::new("4G".to_string());
+                self.create_port_input = Input::new("25565".to_string());
                 self.load_wizard_versions(event_tx);
             }
             Action::CloseCreateModal => {
                 self.show_create_modal = false;
                 self.input_mode = InputMode::Normal;
+                self.create_input_backup = None;
                 self.create_error = None;
                 self.create_progress = None;
             }
             Action::NextWizardField => {
+                let prev = self.create_field_idx;
                 self.create_field_idx = (self.create_field_idx + 1) % 5;
+                if self.create_loader_idx == 3 && prev == 2 {
+                    self.trigger_resolve_modpack(event_tx);
+                }
             }
             Action::PrevWizardField => {
+                let prev = self.create_field_idx;
                 self.create_field_idx = if self.create_field_idx == 0 {
                     4
                 } else {
                     self.create_field_idx - 1
                 };
+                if self.create_loader_idx == 3 && prev == 2 {
+                    self.trigger_resolve_modpack(event_tx);
+                }
             }
             Action::SelectWizardLoader(idx) => {
-                if idx < 3 {
+                if idx < 4 {
                     self.create_loader_idx = idx;
                     self.create_version_idx = 0;
-                    self.load_wizard_versions(event_tx);
+                    if idx < 3 {
+                        self.load_wizard_versions(event_tx);
+                    }
                 }
+            }
+            Action::ResolveModpack => {
+                self.trigger_resolve_modpack(event_tx);
             }
             Action::SubmitCreateInstance => {
                 self.execute_create_instance(event_tx);
+            }
+            Action::PromptDeleteInstance => {
+                if self.instances.is_empty() {
+                    return;
+                }
+                if let Some(inst) = self.selected() {
+                    if inst.state == ServerState::Online
+                        || inst.state == ServerState::Starting
+                        || inst.state == ServerState::Stopping
+                    {
+                        self.set_status("Detén el servidor antes de eliminarlo");
+                        return;
+                    }
+                    self.delete_server_name = Some(inst.name.clone());
+                    self.show_delete_modal = true;
+                }
+            }
+            Action::CancelDeleteInstance => {
+                self.show_delete_modal = false;
+                self.delete_server_name = None;
+            }
+            Action::ConfirmDeleteInstance => {
+                self.show_delete_modal = false;
+                if let Some(name) = self.delete_server_name.take() {
+                    self.execute_delete_instance(&name);
+                }
             }
             Action::Resize(w, h) => {
                 self.terminal_size = (w, h);
@@ -1393,131 +1898,60 @@ impl App {
         });
     }
 
-    fn execute_modrinth_search(
+    pub fn execute_add_mod(
         &mut self,
         event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
     ) {
-        let query = self.modrinth_input.value().trim().to_string();
+        let query = self.add_mod_input.value().trim().to_string();
         if query.is_empty() {
-            return;
-        }
-        let inst = match self.selected() {
-            Some(i) => i.clone(),
-            None => return,
-        };
-
-        if inst.loader == "vanilla" {
-            self.modrinth_error =
-                Some("Vanilla no soporta mods o plugins de Modrinth directamente.".to_string());
+            self.add_mod_error = Some("Ingresa una URL o identificador válido".to_string());
             return;
         }
 
-        self.modrinth_loading = true;
-        self.modrinth_error = None;
-        let tx = event_tx.clone();
-
-        tokio::spawn(async move {
-            let client = crate::modrinth::api::ModrinthClient::new();
-            match client.search(&query, &inst.loader, &inst.mc_version).await {
-                Ok(hits) => {
-                    let _ = tx
-                        .send(crate::tui::event::AppEvent::ModrinthSearchResults(hits))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(crate::tui::event::AppEvent::ModrinthSearchError(
-                            e.to_string(),
-                        ))
-                        .await;
-                }
-            }
-        });
-    }
-
-    fn execute_install_mod(
-        &mut self,
-        event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
-    ) {
-        let hit = match self.modrinth_hits.get(self.selected_mod_hit) {
-            Some(h) => h.clone(),
-            None => return,
-        };
         let inst = match self.selected() {
             Some(i) => i.clone(),
-            None => return,
+            None => {
+                self.add_mod_error = Some("No hay ningún servidor seleccionado".to_string());
+                return;
+            }
         };
-        let paths = self.paths.clone();
+
+        let subfolder = inst.addons_subfolder();
+        let target_dir = self.paths.instance_dir(&inst.name).join(subfolder);
+
+        self.add_mod_loading = true;
+        self.add_mod_error = None;
+
         let tx = event_tx.clone();
-        self.modrinth_progress = Some((0.0, format!("Descargando {}...", hit.title)));
-
         tokio::spawn(async move {
-            let client = crate::modrinth::api::ModrinthClient::new();
-            match client
-                .get_compatible_version(&hit.project_id, &inst.loader, &inst.mc_version)
-                .await
-            {
-                Ok(ver) => {
-                    let file = ver
-                        .files
-                        .iter()
-                        .find(|f| f.primary)
-                        .or_else(|| ver.files.first());
-                    if let Some(file_info) = file {
-                        let target_dir = if inst.loader == "paper" {
-                            paths.instance_dir(&inst.name).join("plugins")
-                        } else {
-                            paths.instance_dir(&inst.name).join("mods")
-                        };
+            let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(64);
+            let reporter = crate::core::progress::ChannelProgressReporter::new(prog_tx);
 
-                        let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(64);
-                        let reporter = crate::core::progress::ChannelProgressReporter::new(prog_tx);
-
-                        let tx_clone = tx.clone();
-                        let progress_task = tokio::spawn(async move {
-                            while let Some(up) = prog_rx.recv().await {
-                                let _ = tx_clone
-                                    .send(crate::tui::event::AppEvent::Progress(up))
-                                    .await;
-                            }
-                        });
-
-                        match client
-                            .download_file(file_info, &target_dir, &reporter)
-                            .await
-                        {
-                            Ok(_) => {
-                                let _ = tx
-                                    .send(crate::tui::event::AppEvent::ModrinthInstalled(
-                                        hit.title.clone(),
-                                    ))
-                                    .await;
-                            }
-                            Err(e) => {
-                                let _ = tx
-                                    .send(crate::tui::event::AppEvent::ModrinthSearchError(
-                                        e.to_string(),
-                                    ))
-                                    .await;
-                            }
-                        }
-                        progress_task.abort();
-                    } else {
-                        let _ = tx
-                            .send(crate::tui::event::AppEvent::ModrinthSearchError(
-                                "No contiene archivos descargables".to_string(),
-                            ))
-                            .await;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(crate::tui::event::AppEvent::ModrinthSearchError(
-                            e.to_string(),
-                        ))
+            let tx_clone = tx.clone();
+            let progress_task = tokio::spawn(async move {
+                while let Some(up) = prog_rx.recv().await {
+                    let _ = tx_clone
+                        .send(crate::tui::event::AppEvent::Progress(up))
                         .await;
                 }
-            }
+            });
+
+            let res = crate::loaders::serverpack::add_addon_from_url_or_slug(
+                &query,
+                &inst.mc_version,
+                &inst.loader,
+                &target_dir,
+                &reporter,
+            )
+            .await;
+
+            progress_task.abort();
+
+            let _ = tx
+                .send(crate::tui::event::AppEvent::AddModCompleted(
+                    res.map_err(|e| e.to_string()),
+                ))
+                .await;
         });
     }
 
@@ -1552,11 +1986,90 @@ impl App {
         });
     }
 
+    pub fn trigger_resolve_modpack(
+        &mut self,
+        event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
+    ) {
+        let query = self.create_modpack_input.value().trim().to_string();
+        if query.is_empty() || self.create_modpack_resolving {
+            return;
+        }
+
+        if let Some(ref res) = self.resolved_modpack {
+            if query == res.version_id
+                || query.contains(&res.version_id)
+                || query == res.suggested_instance_name
+            {
+                return;
+            }
+        }
+
+        let is_sp = crate::loaders::serverpack::is_curseforge_or_zip(&query);
+        self.create_modpack_resolving = true;
+        self.create_modpack_status = Some(if is_sp {
+            "Consultando CurseForge / Server Pack...".to_string()
+        } else {
+            "Consultando Modrinth...".to_string()
+        });
+        self.create_error = None;
+
+        let tx = event_tx.clone();
+        tokio::spawn(async move {
+            let res = crate::modrinth::modpack::resolve_modpack(&query).await;
+            let _ = tx
+                .send(crate::tui::event::AppEvent::ModpackResolved(Box::new(
+                    res.map_err(|e| e.to_string()),
+                )))
+                .await;
+        });
+    }
+
+    pub fn handle_modpack_resolved(
+        &mut self,
+        res: Result<crate::modrinth::modpack::ResolvedModpack, String>,
+    ) {
+        self.create_modpack_resolving = false;
+        match res {
+            Ok(info) => {
+                if self.create_name_input.value().trim().is_empty() {
+                    self.create_name_input =
+                        tui_input::Input::new(info.suggested_instance_name.clone());
+                }
+                let type_desc = match info.pack_type {
+                    crate::modrinth::modpack::PackType::ServerPackZip => "Serverpack",
+                    crate::modrinth::modpack::PackType::ModrinthMrpack => "Modpack",
+                };
+                self.create_modpack_status = Some(format!(
+                    "✓ {} ({}: MC {}, {})",
+                    info.project_title, type_desc, info.mc_version, info.loader
+                ));
+                self.set_status(&format!(
+                    "{} detectado: {} (MC {}, {})",
+                    type_desc, info.project_title, info.mc_version, info.loader
+                ));
+                self.resolved_modpack = Some(info);
+            }
+            Err(e) => {
+                self.create_modpack_status = None;
+                self.create_error = Some(format!("Error al resolver modpack: {}", e));
+            }
+        }
+    }
+
     fn execute_create_instance(
         &mut self,
         event_tx: &tokio::sync::mpsc::Sender<crate::tui::event::AppEvent>,
     ) {
-        let name = self.create_name_input.value().trim().to_string();
+        let is_modpack = self.create_loader_idx == 3;
+        let mut name = self.create_name_input.value().trim().to_string();
+
+        if is_modpack && name.is_empty() {
+            if let Some(ref res) = self.resolved_modpack {
+                name = res.suggested_instance_name.clone();
+                self.create_name_input = tui_input::Input::new(name.clone());
+            }
+        }
+
         if name.is_empty() {
             self.create_error = Some("El nombre no puede estar vacío".to_string());
             return;
@@ -1575,6 +2088,86 @@ impl App {
             return;
         }
 
+        let ram_val = self.create_ram_input.value().trim();
+        let ram = if ram_val.is_empty() {
+            "4G".to_string()
+        } else {
+            ram_val.to_string()
+        };
+
+        let port_val = self.create_port_input.value().trim();
+        let port: u16 = if port_val.is_empty() {
+            25565
+        } else {
+            match port_val.parse() {
+                Ok(p) if p > 1024 => p,
+                _ => {
+                    self.create_error =
+                        Some("Puerto TCP inválido (debe ser un número > 1024)".to_string());
+                    return;
+                }
+            }
+        };
+
+        if is_modpack {
+            let modpack_query = self.create_modpack_input.value().trim().to_string();
+            if modpack_query.is_empty() && self.resolved_modpack.is_none() {
+                self.create_error =
+                    Some("Ingresa la URL de CurseForge, Modrinth o enlace .zip".to_string());
+                return;
+            }
+
+            self.create_error = None;
+            self.create_progress = Some((0.0, format!("Instalando modpack '{}'...", name)));
+
+            let paths = self.paths.clone();
+            let tx = event_tx.clone();
+            let resolved = self.resolved_modpack.clone();
+
+            tokio::spawn(async move {
+                let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel(64);
+                let reporter = crate::core::progress::ChannelProgressReporter::new(prog_tx);
+
+                let tx_clone = tx.clone();
+                let progress_forwarder = tokio::spawn(async move {
+                    while let Some(up) = prog_rx.recv().await {
+                        let _ = tx_clone
+                            .send(crate::tui::event::AppEvent::Progress(up))
+                            .await;
+                    }
+                });
+
+                let res = crate::modrinth::modpack::install_modpack(
+                    &name,
+                    &modpack_query,
+                    resolved,
+                    &ram,
+                    port,
+                    &paths,
+                    &reporter,
+                )
+                .await;
+
+                progress_forwarder.abort();
+
+                match res {
+                    Ok(n) => {
+                        let _ = tx
+                            .send(crate::tui::event::AppEvent::InstanceCreated(Ok(n)))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(crate::tui::event::AppEvent::InstanceCreated(Err(
+                                e.to_string()
+                            )))
+                            .await;
+                    }
+                }
+            });
+            return;
+        }
+
         let loader = match self.create_loader_idx {
             0 => LoaderType::Paper,
             1 => LoaderType::Fabric,
@@ -1584,16 +2177,6 @@ impl App {
         let version = match self.create_versions.get(self.create_version_idx) {
             Some(v) => v.clone(),
             None => "1.21.4".to_string(),
-        };
-
-        let ram = self.create_ram_input.value().trim().to_string();
-        let port: u16 = match self.create_port_input.value().trim().parse() {
-            Ok(p) if p > 1024 => p,
-            _ => {
-                self.create_error =
-                    Some("Puerto TCP inválido (debe ser un número > 1024)".to_string());
-                return;
-            }
         };
 
         self.create_error = None;
@@ -1671,5 +2254,66 @@ impl App {
                 }
             }
         });
+    }
+
+    pub fn execute_delete_instance(&mut self, name: &str) {
+        // 1. Detener procesos huérfanos si aplica
+        let pid_file = self.paths.pid_file(name);
+        if pid_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                for line in content.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        if is_pid_alive(pid) {
+                            #[cfg(unix)]
+                            unsafe {
+                                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&pid_file);
+        }
+
+        let sock = self.paths.socket_path(name);
+        if sock.exists() {
+            let _ = std::fs::remove_file(&sock);
+        }
+
+        // 2. Eliminar el directorio de la instancia
+        let inst_dir = self.paths.instance_dir(name);
+        if inst_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&inst_dir) {
+                self.set_status(&format!("Error al eliminar '{}': {}", name, e));
+                return;
+            }
+        }
+
+        // 3. Limpiar streaming de consola si estaba activo para esta instancia
+        if self.active_console_instance.as_deref() == Some(name) {
+            self.abort_console_stream();
+            self.log_buffer.clear();
+            self.console_scroll = 0;
+            self.active_console_instance = None;
+        }
+
+        // 4. Eliminar de la lista de instancias en App y ajustar índice
+        if let Some(pos) = self.instances.iter().position(|i| i.name == name) {
+            self.instances.remove(pos);
+            if self.instances.is_empty() {
+                self.selected_instance = 0;
+                self.properties_list.clear();
+            } else if self.selected_instance >= self.instances.len() {
+                self.selected_instance = self.instances.len() - 1;
+            }
+        }
+
+        // 5. Recargar propiedades y consola para la nueva instancia seleccionada
+        self.load_properties_for_selected();
+        if self.active_tab == AppTab::Console {
+            self.start_console_stream();
+        }
+
+        self.set_status(&format!("✓ Servidor '{}' eliminado", name));
     }
 }

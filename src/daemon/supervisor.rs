@@ -141,7 +141,9 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
                                     )
                                 }
                             } else {
-                                SocketResponse::Error("El servidor aún está arrancando...".to_string())
+                                SocketResponse::Error(
+                                    "El servidor aún está arrancando...".to_string(),
+                                )
                             }
                         }
                         Ok(SocketRequest::Stop) => {
@@ -149,9 +151,13 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
                             if let Some(ref mut stdin) = *lock {
                                 let _ = stdin.write_all(b"stop\n").await;
                                 let _ = stdin.flush().await;
-                                SocketResponse::Ok("Orden de apagado limpio 'stop' enviada".to_string())
+                                SocketResponse::Ok(
+                                    "Orden de apagado limpio 'stop' enviada".to_string(),
+                                )
                             } else {
-                                SocketResponse::Ok("El servidor se estaba iniciando. Deteniendo.".to_string())
+                                SocketResponse::Ok(
+                                    "El servidor se estaba iniciando. Deteniendo.".to_string(),
+                                )
                             }
                         }
                         Ok(SocketRequest::Ping) => SocketResponse::Ok("pong".to_string()),
@@ -220,7 +226,10 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
 
     let child_pid = child.id().unwrap_or(0);
     child_pid_atomic.store(child_pid, std::sync::atomic::Ordering::Relaxed);
-    let _ = std::fs::write(&pid_path, format!("{}\n{}\n", std::process::id(), child_pid));
+    let _ = std::fs::write(
+        &pid_path,
+        format!("{}\n{}\n", std::process::id(), child_pid),
+    );
     println!(
         "{}",
         format!("✓ Proceso Java en ejecución con PID {}", child_pid).green()

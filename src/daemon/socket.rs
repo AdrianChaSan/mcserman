@@ -24,7 +24,12 @@ pub async fn send_request(socket_path: &Path, req: &SocketRequest) -> Result<Soc
     let connect_future = UnixStream::connect(socket_path);
     let mut stream = timeout(Duration::from_millis(600), connect_future)
         .await
-        .map_err(|_| anyhow::anyhow!("Timeout al conectar con el socket en {}", socket_path.display()))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Timeout al conectar con el socket en {}",
+                socket_path.display()
+            )
+        })?
         .with_context(|| {
             format!(
                 "No se pudo conectar al socket en {}. ¿Está el servidor encendido?",
@@ -38,9 +43,12 @@ pub async fn send_request(socket_path: &Path, req: &SocketRequest) -> Result<Soc
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    timeout(Duration::from_millis(600), reader.read_line(&mut response_line))
-        .await
-        .map_err(|_| anyhow::anyhow!("Timeout esperando respuesta del socket"))??;
+    timeout(
+        Duration::from_millis(600),
+        reader.read_line(&mut response_line),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timeout esperando respuesta del socket"))??;
 
     let resp: SocketResponse = serde_json::from_str(&response_line)
         .context("Respuesta inválida recibida del socket de mcserman")?;

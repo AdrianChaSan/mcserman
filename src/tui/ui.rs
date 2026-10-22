@@ -42,9 +42,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_body(f, chunks[1], app, &theme);
     draw_footer(f, chunks[2], app, &theme);
 
-    // 3. Modal de Creación (si está abierto)
+    // 3. Modales (si están abiertos)
     if app.show_create_modal {
         views::create::draw_modal(f, area, app, &theme);
+    } else if app.show_delete_modal {
+        views::delete::draw_modal(f, area, app, &theme);
+    } else if app.show_add_mod_modal {
+        views::modrinth::draw_add_mod_modal(f, area, app, &theme);
+    } else if app.show_delete_mod_modal {
+        views::modrinth::draw_delete_mod_modal(f, area, app, &theme);
     }
 }
 
@@ -149,7 +155,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             .collect();
 
     let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    let mut list_state = app.instances_list_state.borrow_mut();
+    list_state.select(Some(app.selected_instance));
+    f.render_stateful_widget(list, area, &mut *list_state);
 }
 
 fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -201,27 +209,39 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let footer_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(16)])
+        .constraints([Constraint::Min(0), Constraint::Length(18)])
         .split(area);
 
-    let base_hints = if app.show_create_modal {
+    let base_hints = if app.properties_search_active {
+        Span::styled(
+            "Enter: Fijar búsqueda │ Esc: Cancelar búsqueda",
+            theme.accent,
+        )
+    } else if app.show_delete_modal || app.show_delete_mod_modal {
+        Span::styled(
+            "y/Enter: Confirmar eliminación │ n/Esc: Cancelar",
+            theme.warning,
+        )
+    } else if app.show_add_mod_modal {
+        Span::styled(
+            "Enter: Descargar e instalar extensión │ Esc: Cancelar",
+            theme.accent,
+        )
+    } else if app.show_create_modal {
         if app.input_mode == InputMode::Insert {
             Span::styled(
-                "Esc: Dejar de editar │ Enter: Confirmar │ Tab: Siguiente campo",
+                "Esc: Cancelar │ Tab: Siguiente │ Enter: Confirmar",
                 theme.accent,
             )
         } else {
             Span::styled(
-                "Esc: Cerrar modal │ i/Enter: Editar campo │ Tab/↓: Siguiente │ Enter: Crear",
+                "Esc: Cerrar │ Tab/↓: Siguiente │ ◄►: Cambiar │ i: Editar │ Enter: Crear",
                 theme.base,
             )
         }
     } else if app.input_mode == InputMode::Insert {
         if app.editing_property.is_some() {
-            Span::styled(
-                "Esc: Cancelar edición │ Enter: Guardar valor",
-                theme.accent,
-            )
+            Span::styled("Esc: Cancelar edición │ Enter: Guardar valor", theme.accent)
         } else {
             Span::styled(
                 "Esc: Salir a Modo Normal │ Enter: Confirmar/Enviar",
@@ -233,28 +253,55 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             AppTab::Dashboard => {
                 if app.focus == crate::tui::app::Focus::Sidebar {
                     Span::styled(
-                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ l/→: Panel │ 1-4: Tabs",
+                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ d: Eliminar │ l/→: Panel │ 1-4: Tabs",
                         theme.base,
                     )
                 } else {
                     Span::styled(
-                        "q: Salir │ h/←: Sidebar │ Space: Iniciar/Parar │ n: Nuevo │ 1-4: Tabs",
+                        "q: Salir │ h/←: Sidebar │ Space: Iniciar/Parar │ n: Nuevo │ d: Eliminar │ 1-4: Tabs",
                         theme.base,
                     )
                 }
             }
-            AppTab::Console => Span::styled(
-                "q: Salir │ i/Enter: Escribir comando │ PgUp/PgDn: Historial │ h/l: Foco │ 1-4: Tabs",
-                theme.base,
-            ),
-            AppTab::Modrinth => Span::styled(
-                "q: Salir │ i: Buscar │ j/k: Resultados │ Enter: Instalar │ h/l: Foco │ 1-4: Tabs",
-                theme.base,
-            ),
-            AppTab::Settings => Span::styled(
-                "q: Salir │ j/k: Navegar │ Space/Enter: Editar/Alternar │ s: Guardar │ h/l: Foco │ 1-4: Tabs",
-                theme.base,
-            ),
+            AppTab::Console => {
+                if app.focus == crate::tui::app::Focus::Sidebar {
+                    Span::styled(
+                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ d: Eliminar │ l/→: Consola │ 1-4: Tabs",
+                        theme.base,
+                    )
+                } else {
+                    Span::styled(
+                        "q: Salir │ i/Enter: Escribir comando │ PgUp/PgDn: Historial │ h/l: Foco │ 1-4: Tabs",
+                        theme.base,
+                    )
+                }
+            }
+            AppTab::Modrinth => {
+                if app.focus == crate::tui::app::Focus::Sidebar {
+                    Span::styled(
+                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ d: Eliminar │ l/→: Mods │ 1-4: Tabs",
+                        theme.base,
+                    )
+                } else {
+                    Span::styled(
+                        "q: Salir │ j/k: Navegar │ u: Instalar por URL │ d: Eliminar │ 1-4: Tabs",
+                        theme.base,
+                    )
+                }
+            }
+            AppTab::Settings => {
+                if app.focus == crate::tui::app::Focus::Sidebar {
+                    Span::styled(
+                        "q: Salir │ j/k: Servidor │ Space: Iniciar/Parar │ n: Nuevo │ d: Eliminar │ l/→: Opciones │ 1-4: Tabs",
+                        theme.base,
+                    )
+                } else {
+                    Span::styled(
+                        "q: Salir │ j/k: Navegar │ a: Todas/Comunes │ /: Buscar │ Space: Alternar │ Enter: Editar │ s: Guardar",
+                        theme.base,
+                    )
+                }
+            }
         }
     };
 
@@ -279,8 +326,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         vec![Span::raw(" "), base_hints]
     };
 
-    let left_p = Paragraph::new(Line::from(line_spans))
-        .style(Style::default().bg(Color::Rgb(24, 28, 36)));
+    let left_p =
+        Paragraph::new(Line::from(line_spans)).style(Style::default().bg(Color::Rgb(24, 28, 36)));
     f.render_widget(left_p, footer_chunks[0]);
 
     let version_p = Paragraph::new(concat!("mcserman v", env!("CARGO_PKG_VERSION"), " "))

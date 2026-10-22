@@ -98,4 +98,54 @@ impl SystemPaths {
     pub fn logs_file(&self, name: &str) -> PathBuf {
         self.instance_dir(name).join("logs").join("latest.log")
     }
+
+    #[allow(dead_code)]
+    pub fn list_instances(&self) -> Vec<String> {
+        let mut list = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.instances_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() && entry.path().join("instance.toml").exists() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        list.push(name.to_string());
+                    }
+                }
+            }
+        }
+        list.sort();
+        list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_instances() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("mcserman_paths_test_{}", unique_id));
+        let paths = SystemPaths {
+            instances_dir: temp_dir.join("instances"),
+            runtimes_dir: temp_dir.join("runtimes"),
+            socket_dir: temp_dir.join("run"),
+            base_dir: temp_dir.clone(),
+        };
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(paths.list_instances(), Vec::<String>::new());
+
+        let inst1 = paths.instance_dir("server_b");
+        let inst2 = paths.instance_dir("server_a");
+        std::fs::create_dir_all(&inst1).unwrap();
+        std::fs::create_dir_all(&inst2).unwrap();
+        std::fs::write(inst1.join("instance.toml"), "").unwrap();
+        std::fs::write(inst2.join("instance.toml"), "").unwrap();
+
+        assert_eq!(paths.list_instances(), vec!["server_a", "server_b"]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

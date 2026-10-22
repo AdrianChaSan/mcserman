@@ -6,40 +6,16 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-pub struct SearchHit {
-    pub project_id: String,
-    pub title: String,
-    pub description: String,
-    pub slug: String,
-    #[serde(default)]
-    pub author: Option<String>,
-    #[serde(default)]
-    pub downloads: Option<u64>,
-    pub client_side: String,
-    pub server_side: String,
-}
-
-pub fn format_downloads(count: u64) -> String {
-    if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 1_000 {
-        format!("{:.1}K", count as f64 / 1_000.0)
-    } else {
-        count.to_string()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SearchResponse {
-    hits: Vec<SearchHit>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct ProjectVersion {
     pub id: String,
+    #[serde(default)]
+    pub project_id: String,
     pub name: String,
     pub version_number: String,
+    #[serde(default)]
+    pub game_versions: Vec<String>,
+    #[serde(default)]
+    pub loaders: Vec<String>,
     pub files: Vec<VersionFile>,
 }
 
@@ -74,31 +50,6 @@ impl ModrinthClient {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
-    }
-
-    pub async fn search(
-        &self,
-        query: &str,
-        loader: &str,
-        mc_version: &str,
-    ) -> Result<Vec<SearchHit>> {
-        let facets = format!(r#"[["categories:{}"],["versions:{}"]]"#, loader, mc_version);
-        let url = format!(
-            "https://api.modrinth.com/v2/search?query={}&facets={}&limit=10",
-            urlencoding::encode(query),
-            urlencoding::encode(&facets)
-        );
-
-        let res: SearchResponse = self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .json()
-            .await
-            .context("Error al consultar la API de Modrinth")?;
-
-        Ok(res.hits)
     }
 
     pub async fn get_compatible_version(
