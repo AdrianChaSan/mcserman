@@ -10,14 +10,11 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .or_else(|| app.selected().map(|i| i.name.as_str()))
         .unwrap_or("servidor");
 
-    // 1. Fondo de atenuación (dimming) sobre la pantalla completa
     let dim_block = Block::default().style(Style::default().bg(Color::Rgb(10, 10, 15)));
     f.render_widget(dim_block, area);
 
-    // 2. Rectángulo centrado para el modal de confirmación
     let popup = centered_rect(78, 8, area);
 
-    // 3. Limpiar fondo y renderizar bloque modal
     f.render_widget(Clear, popup);
 
     let block = Block::default()

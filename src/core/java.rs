@@ -167,14 +167,12 @@ pub fn find_all_local_javas(paths: &SystemPaths) -> Vec<(u8, PathBuf)> {
         }
     };
 
-    // 1. Variables de entorno conocidas
     for v in [8, 17, 21, 25] {
         if let Ok(val) = std::env::var(format!("MCSERVER_JAVA_{}_PATH", v)) {
             add_candidate(PathBuf::from(val));
         }
     }
 
-    // 2. /etc/set-environment (NixOS sessionVariables)
     if Path::new("/etc/set-environment").exists() {
         if let Ok(content) = std::fs::read_to_string("/etc/set-environment") {
             for line in content.lines() {
@@ -189,18 +187,15 @@ pub fn find_all_local_javas(paths: &SystemPaths) -> Vec<(u8, PathBuf)> {
         }
     }
 
-    // 3. JAVA_HOME
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         add_candidate(PathBuf::from(java_home));
     }
 
-    // 4. PATH y rutas NixOS
     if let Ok(p) = which::which("java") {
         add_candidate(p);
     }
     add_candidate(PathBuf::from("/run/current-system/sw/bin/java"));
 
-    // 5. Runtimes locales descargados
     for v in [8, 16, 17, 21, 25] {
         let dir = paths.runtimes_dir.join(format!("java-{}", v));
         if let Some(bin) = find_java_binary(&dir) {
@@ -216,7 +211,7 @@ pub async fn resolve_java(
     paths: &SystemPaths,
     reporter: &dyn ProgressReporter,
 ) -> Result<JavaRuntime> {
-    // 1. Variable de entorno inyectada por NixOS o el usuario
+    // Variable de entorno inyectada por NixOS o el usuario
     let env_var_name = format!("MCSERVER_JAVA_{}_PATH", version);
     if let Ok(env_path) = std::env::var(&env_var_name) {
         let p = PathBuf::from(env_path);
@@ -236,8 +231,7 @@ pub async fn resolve_java(
         }
     }
 
-    // 1.1 Si estamos en NixOS y la variable no está en el entorno del proceso actual,
-    // consultar /etc/set-environment (donde NixOS guarda sessionVariables del sistema)
+    // Consulta de /etc/set-environment para sessionVariables en NixOS
     if Path::new("/etc/set-environment").exists() {
         if let Ok(content) = std::fs::read_to_string("/etc/set-environment") {
             for line in content.lines() {
@@ -262,7 +256,6 @@ pub async fn resolve_java(
         }
     }
 
-    // 1.2 Revisar JAVA_HOME si está definido
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         let p = PathBuf::from(java_home);
         let java_bin = if p.is_dir() {
@@ -284,7 +277,6 @@ pub async fn resolve_java(
         }
     }
 
-    // 2. Verificar comando java en PATH o rutas estándar de NixOS (/run/current-system/sw/bin/java)
     let java_candidates = [
         which::which("java").ok(),
         Some(PathBuf::from("/run/current-system/sw/bin/java")),
@@ -305,7 +297,6 @@ pub async fn resolve_java(
         }
     }
 
-    // 3. Verificar si ya tenemos el runtime descargado en runtimes_dir
     let local_runtime_dir = paths.runtimes_dir.join(format!("java-{}", version));
     if let Some(java_bin) = find_java_binary(&local_runtime_dir) {
         if query_java_version(&java_bin).is_ok() {
@@ -318,10 +309,8 @@ pub async fn resolve_java(
         }
     }
 
-    // 4. Fallback en NixOS / Entorno Nix:
     let on_nixos = Path::new("/etc/NIXOS").exists() || is_nix_available();
     if on_nixos {
-        // 4.1 Si el comando nix está disponible y la versión requerida mapea directamente en nixpkgs
         if is_nix_available() {
             if let Some(pkg) = nix_package_for_java(version) {
                 reporter.on_info(&format!(
@@ -332,7 +321,7 @@ pub async fn resolve_java(
             }
         }
 
-        // 4.2 Fallback al JDK local más cercano superior disponible en el sistema (ej. Java 17 para versión 16)
+        // Fallback al JDK local más cercano superior disponible en el sistema (ej. Java 17 para versión 16)
         let local_javas = find_all_local_javas(paths);
         let closest_superior = local_javas
             .into_iter()
@@ -347,8 +336,7 @@ pub async fn resolve_java(
             return Ok(JavaRuntime::Direct(sup_bin));
         }
 
-        // 4.3 Si no hay JDK local superior y la versión no mapea exactamente en nixpkgs (ej. 16),
-        // envolver dinámicamente con el JDK LTS superior en nixpkgs (ej. nixpkgs#jdk17)
+        // Si no hay paquete exacto ni JDK local superior, usar el siguiente JDK LTS en nixpkgs
         if is_nix_available() {
             let next_pkg = if version <= 17 {
                 "nixpkgs#jdk17".to_string()
@@ -371,7 +359,7 @@ pub async fn resolve_java(
         );
     }
 
-    // 5. Auto-descarga desde Adoptium API para distribuciones estándar (Ubuntu, Debian, Fedora, Arch)
+    // Descarga desde Adoptium API para distribuciones estándar
     reporter.on_info(&format!(
         "☕ Java {} no encontrado. Descargando automáticamente Eclipse Temurin...",
         version
@@ -490,7 +478,6 @@ async fn download_adoptium_java(
     }
     reporter.on_info("Descarga de Java completada. Extrayendo runtime...");
 
-    // Descomprimir tar.gz
     let tar_file = std::fs::File::open(&temp_tar)?;
     let decompressor = flate2::read::GzDecoder::new(tar_file);
     let mut archive = tar::Archive::new(decompressor);
@@ -583,7 +570,6 @@ mod tests {
     #[test]
     fn test_find_all_local_javas_safe_execution() {
         let paths = SystemPaths::resolve();
-        // Debe ejecutarse sin pánicos
         let _ = find_all_local_javas(&paths);
     }
 

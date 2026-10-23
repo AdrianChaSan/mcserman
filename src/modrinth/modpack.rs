@@ -107,6 +107,7 @@ pub struct ResolvedModpack {
     pub mrpack_filename: String,
     pub mrpack_sha512: Option<String>,
     pub mrpack_size: u64,
+    pub modpack_info: Option<crate::core::config::ModpackInfo>,
 }
 
 pub fn parse_modpack_input(input: &str) -> (Option<String>, Option<String>) {
@@ -206,7 +207,6 @@ pub async fn resolve_modpack(input: &str) -> Result<ResolvedModpack> {
             .await
             .with_context(|| format!("Error al obtener versión '{}' de Modrinth", ver_id))?
     } else if let Some(ref proj) = parsed_project {
-        // 1. Probar si la entrada es un ID de versión directamente
         let ver_url = format!("https://api.modrinth.com/v2/version/{}", proj);
         if let Ok(resp) = client.get(&ver_url).send().await {
             if resp.status().is_success() {
@@ -215,7 +215,6 @@ pub async fn resolve_modpack(input: &str) -> Result<ResolvedModpack> {
                 }
             }
         }
-        // 2. Si no, consultar versiones del proyecto
         let url = format!("https://api.modrinth.com/v2/project/{}/version", proj);
         let versions: Vec<ProjectVersion> = client
             .get(&url)
@@ -278,6 +277,14 @@ async fn build_resolved_modpack(
         .cloned()
         .unwrap_or_else(|| "fabric".to_string());
 
+    let modpack_info = Some(crate::core::config::ModpackInfo {
+        provider: "Modrinth".to_string(),
+        name: title.clone(),
+        version: version.version_number.clone(),
+        project_id: Some(version.project_id.clone()),
+        file_id: Some(version.id.clone()),
+    });
+
     Ok(ResolvedModpack {
         pack_type: PackType::ModrinthMrpack,
         project_id: version.project_id,
@@ -292,6 +299,7 @@ async fn build_resolved_modpack(
         mrpack_filename: mrpack_file.filename.clone(),
         mrpack_sha512: mrpack_file.hashes.sha512.clone(),
         mrpack_size: mrpack_file.size,
+        modpack_info,
     })
 }
 
@@ -373,7 +381,6 @@ pub fn extract_mrpack_overrides(mrpack_path: &Path, target_dir: &Path) -> Result
     let file = std::fs::File::open(mrpack_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    // 1. Extraer overrides/
     for i in 0..archive.len() {
         let mut zip_file = archive.by_index(i)?;
         let name = zip_file.name().to_string();
@@ -394,7 +401,7 @@ pub fn extract_mrpack_overrides(mrpack_path: &Path, target_dir: &Path) -> Result
         }
     }
 
-    // 2. Extraer server-overrides/ (sobrescribe sobre overrides/ si hay conflicto)
+    // server-overrides tiene prioridad y sobrescribe sobre overrides/
     for i in 0..archive.len() {
         let mut zip_file = archive.by_index(i)?;
         let name = zip_file.name().to_string();
@@ -582,7 +589,6 @@ pub async fn install_modpack(
 
     let temp_mrpack = inst_dir.join(".serverpack.mrpack.tmp");
 
-    // 1. Descargar .mrpack
     download_mrpack_file(
         &client,
         &resolved.mrpack_url,
@@ -592,7 +598,6 @@ pub async fn install_modpack(
     )
     .await?;
 
-    // 2. Extraer modrinth.index.json
     reporter.on_info("Leyendo manifiesto modrinth.index.json...");
     let index = extract_mrpack_index(&temp_mrpack)?;
 
@@ -610,14 +615,11 @@ pub async fn install_modpack(
         );
     }
 
-    // 3. Extraer overrides y server-overrides
     reporter.on_info("Extrayendo configuraciones y server-overrides...");
     extract_mrpack_overrides(&temp_mrpack, &inst_dir)?;
 
-    // 4. Descargar mods de servidor
     download_serverpack_files(&client, &index.files, &inst_dir, reporter).await?;
 
-    // 5. Descargar Fabric Server JAR
     let target_jar = inst_dir.join(format!("fabric-server-{}.jar", mc_version));
     reporter.on_info(&format!(
         "Instalando Fabric Server para MC {}...",
@@ -631,11 +633,9 @@ pub async fn install_modpack(
     )
     .await?;
 
-    // 6. Resolver Java para la versión de Minecraft
     let java_ver = crate::core::java::required_java_version(mc_version);
     crate::core::java::resolve_java(java_ver, paths, reporter).await?;
 
-    // 7. Generar eula.txt, server.properties e instance.toml
     std::fs::write(inst_dir.join("eula.txt"), "eula=true\n")?;
 
     let props_path = inst_dir.join("server.properties");
@@ -653,9 +653,9 @@ pub async fn install_modpack(
     config.port = port;
     config.loader_version = Some(installed_loader_ver);
     config.source_pack = Some(format!("modpack:{}", resolved.project_title));
+    config.modpack_info = resolved.modpack_info;
     config.save(&paths.instance_config(name))?;
 
-    // 8. Limpiar archivo temporal
     let _ = std::fs::remove_file(&temp_mrpack);
 
     reporter.on_finish(&format!(

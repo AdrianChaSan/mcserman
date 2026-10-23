@@ -10,7 +10,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     let theme = Theme::new();
     let area = f.area();
 
-    // 1. Verificación de tamaño mínimo de terminal
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let msg = format!(
             "Terminal demasiado pequeña ({}x{}). Mínimo requerido: {}x{}",
@@ -28,7 +27,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
 
-    // 2. División Vertical: Header + Contenido + Footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -42,7 +40,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_body(f, chunks[1], app, &theme);
     draw_footer(f, chunks[2], app, &theme);
 
-    // 3. Modales (si están abiertos)
     if app.show_create_modal {
         views::create::draw_modal(f, area, app, &theme);
     } else if app.show_delete_modal {
@@ -173,7 +170,6 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme.border
     };
 
-    // Barra de Tabs
     let tab_titles: Vec<Line> = AppTab::ALL
         .iter()
         .map(|t| {
@@ -197,7 +193,6 @@ fn draw_main_panel(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     f.render_widget(tabs, chunks[0]);
 
-    // Contenido de la pestaña activa delegada a submódulos de views/
     match app.active_tab {
         AppTab::Dashboard => views::dashboard::draw(f, chunks[1], app, theme),
         AppTab::Console => views::console::draw(f, chunks[1], app, theme),

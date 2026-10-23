@@ -78,7 +78,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let search_has_query = !app.properties_search_input.value().is_empty();
     let filtered = app.filtered_properties();
 
-    // 1. Subdivisión vertical si el buscador está activo o tiene texto de filtro
     let (search_area_opt, list_area) = if is_searching || search_has_query {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -89,7 +88,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         (None, area)
     };
 
-    // Renderizado del input de búsqueda (si aplica)
     if let Some(search_rect) = search_area_opt {
         let search_block = Block::default()
             .borders(Borders::ALL)
@@ -131,7 +129,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         f.render_widget(search_p, search_rect);
     }
 
-    // 2. Lista de Propiedades (100% de ancho)
     let dirty_indicator = if app.properties_dirty {
         " [* Modificado - 's' guardar]"
     } else {
@@ -273,7 +270,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         list_state.select(Some(app.selected_property));
         f.render_stateful_widget(list, list_area, &mut *list_state);
 
-        // Scrollbar vertical en el margen derecho de la lista
         let mut scrollbar_state =
             ScrollbarState::new(filtered.len()).position(app.selected_property);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)

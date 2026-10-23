@@ -6,14 +6,13 @@ use ratatui::widgets::{
 };
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // Limpiar toda el área del Tab 2 antes de dibujar
     f.render_widget(Clear, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // Visor de logs
-            Constraint::Length(3), // Input de comandos
+            Constraint::Min(0),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -22,13 +21,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // Limpiar área de logs para prevenir texto fantasma residual
     f.render_widget(Clear, area);
 
     let inner_width = area.width.saturating_sub(2) as usize;
     let viewport_height = area.height.saturating_sub(2) as usize;
 
-    // 1. Cálculo de filas visuales totales con wrap
     let total_visual_lines: usize = if inner_width == 0 {
         0
     } else {
@@ -41,7 +38,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             .sum()
     };
 
-    // 2. Clamping estricto del scroll_offset
     let max_scroll = total_visual_lines.saturating_sub(viewport_height);
     let clamped_scroll = app.console_scroll.min(max_scroll);
     let scroll_y = max_scroll.saturating_sub(clamped_scroll);
@@ -74,7 +70,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .border_style(border_style)
         .title(title);
 
-    // 3. Virtualización del Viewport (Window Slicing)
     if app.log_buffer.is_empty() {
         let empty_line = Line::from(Span::styled(
             " No hay registros disponibles para esta instancia.",
@@ -85,7 +80,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     } else {
         let total_lines = app.log_buffer.len();
 
-        // Determinar end_idx saltando clamped_scroll filas visuales desde el fondo
         let mut skip_rows = clamped_scroll;
         let mut end_idx = total_lines;
         if inner_width > 0 {
@@ -101,7 +95,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             }
         }
 
-        // Acumular filas visuales hacia atrás desde end_idx para cubrir viewport_height
         let needed_rows = viewport_height + skip_rows;
         let mut accumulated_rows = 0;
         let mut start_idx = end_idx;
@@ -125,7 +118,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Vec::new()
         };
 
-        // Scroll local mínimo (en caso de wrap parcial de la línea superior o inferior)
         let local_scroll_y = accumulated_rows.saturating_sub(viewport_height + skip_rows);
 
         let p = Paragraph::new(slice_lines)
@@ -135,7 +127,6 @@ fn draw_logs_window(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         f.render_widget(p, area);
     }
 
-    // 4. Scrollbar vertical sincronizado con max_scroll y la posición actual
     if max_scroll > 0 {
         let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_y);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)

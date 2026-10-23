@@ -54,6 +54,19 @@ impl std::str::FromStr for LoaderType {
     }
 }
 
+/// Metadatos sobre el modpack de origen (CurseForge o Modrinth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModpackInfo {
+    pub provider: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub file_id: Option<String>,
+}
+
+/// Configuración principal serializada en `instance.toml` para cada instancia administrada.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceConfig {
     pub name: String,
@@ -72,9 +85,12 @@ pub struct InstanceConfig {
     pub extra_jvm_args: Vec<String>,
     #[serde(default)]
     pub source_pack: Option<String>,
+    #[serde(default)]
+    pub modpack_info: Option<ModpackInfo>,
 }
 
 impl InstanceConfig {
+    /// Crea una nueva configuración con valores predeterminados y JAR según el loader y versión.
     pub fn new(name: String, loader: LoaderType, mc_version: String) -> Self {
         let java_ver = crate::core::java::required_java_version(&mc_version);
         let jar_name = match loader {
@@ -105,9 +121,11 @@ impl InstanceConfig {
             aikar_flags: true,
             extra_jvm_args: Vec::new(),
             source_pack: None,
+            modpack_info: None,
         }
     }
 
+    /// Carga y parsea la configuración de una instancia desde su archivo TOML en disco.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("No se pudo leer la configuración en {}", path.display()))?;
@@ -116,6 +134,7 @@ impl InstanceConfig {
         Ok(config)
     }
 
+    /// Guarda la configuración de la instancia serializada en formato TOML en disco.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -128,6 +147,7 @@ impl InstanceConfig {
         Ok(())
     }
 
+    /// Genera la lista de argumentos JVM requeridos para arrancar el servidor según el loader.
     pub fn jvm_args(&self, instance_dir: &Path) -> Vec<String> {
         let mut args = Vec::new();
         args.push(format!("-Xms{}", self.ram_min));
@@ -299,6 +319,220 @@ fn search_file_recursive(dir: &Path, target: &str, depth: usize) -> Option<PathB
     None
 }
 
+/// Resuelve la versión específica del modloader mediante configuración, variables o inspección del directorio.
+pub fn resolve_instance_loader_version(
+    instance_dir: &Path,
+    config_loader_version: Option<&str>,
+    loader: LoaderType,
+    mc_version: &str,
+) -> Option<String> {
+    if let Some(v) = config_loader_version {
+        if !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+
+    // 1. variables.txt (ServerPackCreator)
+    let vars_path = instance_dir.join("variables.txt");
+    if let Ok(content) = std::fs::read_to_string(&vars_path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                if (k.eq_ignore_ascii_case("MODLOADER_VERSION")
+                    || k.eq_ignore_ascii_case("FORGE_VERSION")
+                    || k.eq_ignore_ascii_case("NEOFORGE_VERSION")
+                    || k.eq_ignore_ascii_case("FABRIC_VERSION"))
+                    && !v.is_empty()
+                {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. manifest.json (CurseForge)
+    let manifest_path = instance_dir.join("manifest.json");
+    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(loaders) = val
+                .get("minecraft")
+                .and_then(|m| m.get("modLoaders"))
+                .and_then(|ml| ml.as_array())
+            {
+                for l in loaders {
+                    if let Some(id) = l.get("id").and_then(|i| i.as_str()) {
+                        if let Some((_, ver)) = id.split_once('-') {
+                            return Some(ver.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. modrinth.index.json (Modrinth)
+    let index_path = instance_dir.join("modrinth.index.json");
+    if let Ok(content) = std::fs::read_to_string(&index_path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(deps) = val.get("dependencies").and_then(|d| d.as_object()) {
+                if let Some(v) = deps.get("fabric-loader").and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+                if let Some(v) = deps.get("neoforge").and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+                if let Some(v) = deps.get("forge").and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+                if let Some(v) = deps.get("quilt-loader").and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+
+    // 4. Directorios libraries/... o JAR raíz
+    match loader {
+        LoaderType::Forge => {
+            let forge_lib = instance_dir
+                .join("libraries")
+                .join("net")
+                .join("minecraftforge")
+                .join("forge");
+            if let Ok(entries) = std::fs::read_dir(&forge_lib) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if let Some(stripped) = name.strip_prefix(&format!("{}-", mc_version)) {
+                                return Some(stripped.to_string());
+                            } else {
+                                return Some(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(entries) = std::fs::read_dir(instance_dir) {
+                for entry in entries.flatten() {
+                    if let Some(fname) = entry.file_name().to_str() {
+                        if fname.starts_with("forge-") && fname.ends_with(".jar") {
+                            let stem = fname.strip_suffix(".jar").unwrap();
+                            let stem = stem.strip_suffix("-universal").unwrap_or(stem);
+                            if let Some(rest) = stem.strip_prefix("forge-") {
+                                if let Some(ver) = rest.strip_prefix(&format!("{}-", mc_version)) {
+                                    return Some(ver.to_string());
+                                } else {
+                                    return Some(rest.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LoaderType::NeoForge => {
+            let neoforge_lib = instance_dir
+                .join("libraries")
+                .join("net")
+                .join("neoforged")
+                .join("neoforge");
+            if let Ok(entries) = std::fs::read_dir(&neoforge_lib) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            return Some(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
+/// Resuelve metadatos del modpack (nombre, versión, proveedor, IDs) a partir de manifiestos o configuración.
+pub fn resolve_instance_modpack_info(
+    instance_dir: &Path,
+    config_modpack_info: Option<&ModpackInfo>,
+    source_pack: Option<&str>,
+) -> Option<ModpackInfo> {
+    if let Some(info) = config_modpack_info {
+        return Some(info.clone());
+    }
+
+    // 1. Revisar manifest.json (CurseForge)
+    let manifest_path = instance_dir.join("manifest.json");
+    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            let name_opt = val.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+            let ver_opt = val.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let (Some(name), Some(version)) = (name_opt, ver_opt) {
+                let project_id = val.get("projectID").and_then(|p| {
+                    p.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| p.as_u64().map(|n| n.to_string()))
+                        .or_else(|| p.as_i64().map(|n| n.to_string()))
+                });
+
+                let file_id = if let Some(sp) = source_pack {
+                    let (_, fid) = crate::loaders::serverpack::parse_curseforge_url(sp);
+                    fid.map(|id| id.to_string())
+                } else {
+                    None
+                };
+
+                return Some(ModpackInfo {
+                    provider: "CurseForge".to_string(),
+                    name,
+                    version,
+                    project_id,
+                    file_id,
+                });
+            }
+        }
+    }
+
+    // 2. Revisar modrinth.index.json (Modrinth)
+    let index_path = instance_dir.join("modrinth.index.json");
+    if let Ok(content) = std::fs::read_to_string(&index_path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            let name_opt = val.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+            let ver_opt = val.get("versionId").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let (Some(name), Some(version)) = (name_opt, ver_opt) {
+                return Some(ModpackInfo {
+                    provider: "Modrinth".to_string(),
+                    name,
+                    version: version.clone(),
+                    project_id: None,
+                    file_id: Some(version),
+                });
+            }
+        }
+    }
+
+    // 3. Revisar source_pack si proviene de CurseForge
+    if let Some(sp) = source_pack {
+        if sp.contains("curseforge.com") {
+            let (slug, fid) = crate::loaders::serverpack::parse_curseforge_url(sp);
+            let name = slug.unwrap_or_else(|| "CurseForge Modpack".to_string());
+            let file_str = fid.map(|id| id.to_string());
+            return Some(ModpackInfo {
+                provider: "CurseForge".to_string(),
+                name,
+                version: file_str.clone().unwrap_or_default(),
+                project_id: None,
+                file_id: file_str,
+            });
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +668,61 @@ mod tests {
         assert!(!jvm_args.contains(&"--installer-force".to_string()));
         assert!(!jvm_args.contains(&"--installer".to_string()));
         assert!(jvm_args.contains(&"nogui".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_instance_loader_version() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_cfg_loader_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Direct config override
+        let ver = resolve_instance_loader_version(&temp_dir, Some("21.1.65"), LoaderType::NeoForge, "1.21.1");
+        assert_eq!(ver, Some("21.1.65".to_string()));
+
+        // 2. From variables.txt
+        let vars_file = temp_dir.join("variables.txt");
+        std::fs::write(&vars_file, "MODLOADER_VERSION=\"14.23.5.2860\"\n").unwrap();
+        let ver = resolve_instance_loader_version(&temp_dir, None, LoaderType::Forge, "1.12.2");
+        assert_eq!(ver, Some("14.23.5.2860".to_string()));
+        let _ = std::fs::remove_file(&vars_file);
+
+        // 3. From manifest.json
+        let manifest_file = temp_dir.join("manifest.json");
+        std::fs::write(
+            &manifest_file,
+            r#"{"minecraft":{"version":"1.12.2","modLoaders":[{"id":"forge-14.23.5.2860","primary":true}]}}"#,
+        )
+        .unwrap();
+        let ver = resolve_instance_loader_version(&temp_dir, None, LoaderType::Forge, "1.12.2");
+        assert_eq!(ver, Some("14.23.5.2860".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_instance_modpack_info() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_cfg_mpinfo_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let manifest_file = temp_dir.join("manifest.json");
+        std::fs::write(
+            &manifest_file,
+            r#"{"name":"RLCraft Dregora","version":"1.1.2b","projectID":1003933}"#,
+        )
+        .unwrap();
+
+        let info = resolve_instance_modpack_info(&temp_dir, None, Some("https://www.curseforge.com/minecraft/modpacks/rlcraft-dregora/files/7285701"));
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.provider, "CurseForge");
+        assert_eq!(info.name, "RLCraft Dregora");
+        assert_eq!(info.version, "1.1.2b");
+        assert_eq!(info.project_id, Some("1003933".to_string()));
+        assert_eq!(info.file_id, Some("7285701".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

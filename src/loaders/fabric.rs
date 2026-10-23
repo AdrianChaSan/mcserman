@@ -24,7 +24,6 @@ pub async fn download_fabric_custom(
 ) -> Result<String> {
     let client = reqwest::Client::new();
 
-    // 1. Obtener última versión estable del Loader (o usar la especificada)
     let loader_url = "https://meta.fabricmc.net/v2/versions/loader";
     let loaders: Vec<FabricLoaderVersion> = client
         .get(loader_url)
@@ -49,7 +48,6 @@ pub async fn download_fabric_custom(
         chosen_loader_version, mc_version
     ));
 
-    // 2. Obtener última versión estable del Installer
     let installer_url = "https://meta.fabricmc.net/v2/versions/installer";
     let installers: Vec<FabricInstallerVersion> = client
         .get(installer_url)
@@ -65,7 +63,6 @@ pub async fn download_fabric_custom(
         .or_else(|| installers.first())
         .with_context(|| "No se encontraron versiones de Fabric Installer")?;
 
-    // 3. Descargar el server jar preempaquetado de Fabric
     let download_url = format!(
         "https://meta.fabricmc.net/v2/versions/loader/{}/{}/{}/server/jar",
         mc_version, chosen_loader_version, latest_installer.version

@@ -76,7 +76,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         .bold()
     );
 
-    // 1. Asegurar EULA
     let eula_path = instance_dir.join("eula.txt");
     if !eula_path.exists()
         || !std::fs::read_to_string(&eula_path)
@@ -87,7 +86,7 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
             .context("No se pudo escribir eula.txt con eula=true")?;
     }
 
-    // 2. Preparar socket y PID antes de cualquier tarea bloqueante
+    // Preparar socket y PID antes de tareas bloqueantes para responder de inmediato a consultas
     paths.ensure_dirs()?;
     let pid_path = paths.pid_file(instance_name);
     let _ = std::fs::write(&pid_path, format!("{}\n", std::process::id()));
@@ -179,7 +178,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         }
     });
 
-    // 3. Resolver Java
     let java_runtime = if let Some(ref custom_java) = config.java_path {
         crate::core::java::JavaRuntime::Direct(custom_java.clone())
     } else {
@@ -191,7 +189,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         .await?
     };
 
-    // 4. Preparar archivo de log
     let logs_dir = instance_dir.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
     let latest_log_path = logs_dir.join("latest.log");
@@ -209,7 +206,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     let _ = init_file.flush().await;
     let log_file = Arc::new(Mutex::new(init_file));
 
-    // 5. Lanzar proceso Java
     let jvm_args = config.jvm_args(&instance_dir);
     println!(
         "☕ Ejecutando: {} {}",
@@ -248,7 +244,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         .context("No se pudo capturar stdin de Java")?;
     *child_stdin.lock().await = Some(raw_stdin);
 
-    // Canalizar stdout
     let child_stdout = child
         .stdout
         .take()
@@ -267,12 +262,10 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
             let mut file = log_file_clone1.lock().await;
             let _ = file.write_all(out.as_bytes()).await;
             let _ = file.flush().await;
-            // Imprimir al stdout del daemon para systemd journalctl
             println!("{}", trimmed);
         }
     });
 
-    // Canalizar stderr
     let child_stderr = child
         .stderr
         .take()
@@ -291,7 +284,6 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
         }
     });
 
-    // 6. Señales de apagado
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]

@@ -19,19 +19,16 @@ pub enum Action {
     FocusSidebar,
     FocusMainPanel,
     ToggleFocus,
-    // Consola
     SubmitConsoleCommand,
     ScrollLogUp(usize),
     ScrollLogDown(usize),
     ScrollLogBottom,
-    // Gestor de Mods
     OpenAddModModal,
     CloseAddModModal,
     SubmitAddModUrl,
     PromptDeleteMod,
     CancelDeleteMod,
     ConfirmDeleteMod,
-    // Propiedades
     ToggleProperty,
     CycleProperty(i8),
     SaveProperties,
@@ -42,7 +39,6 @@ pub enum Action {
     CancelPropertiesSearch,
     ConfirmPropertiesSearch,
     TogglePropertiesShowAll,
-    // Modal Creación
     OpenCreateModal,
     CloseCreateModal,
     NextWizardField,
@@ -50,7 +46,6 @@ pub enum Action {
     SelectWizardLoader(usize),
     ResolveModpack,
     SubmitCreateInstance,
-    // Modal Eliminación
     PromptDeleteInstance,
     CancelDeleteInstance,
     ConfirmDeleteInstance,

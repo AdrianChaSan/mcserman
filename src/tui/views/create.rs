@@ -4,14 +4,11 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Padding, Paragraph};
 
 pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // 1. Fondo de atenuación (dimming) sobre la pantalla completa
     let dim_block = Block::default().style(Style::default().bg(Color::Rgb(10, 10, 15)));
     f.render_widget(dim_block, area);
 
-    // 2. Rectángulo centrado para el modal
     let popup = centered_rect(68, 80, area);
 
-    // 3. Limpiar fondo y renderizar bloque modal opaco con doble borde y padding
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -28,17 +25,16 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // 0. Nombre
-            Constraint::Length(3), // 1. Loader
-            Constraint::Length(3), // 2. Versión
-            Constraint::Length(3), // 3. RAM
-            Constraint::Length(3), // 4. Puerto
-            Constraint::Length(2), // 5. Error o Progreso
-            Constraint::Length(1), // 6. Barra de ayuda
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(content_area);
 
-    // 0. Nombre
     draw_input_field(
         f,
         inner[0],
@@ -50,7 +46,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         app.create_name_input.visual_cursor(),
     );
 
-    // 1. Loader
     draw_loader_selector(
         f,
         inner[1],
@@ -59,7 +54,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme,
     );
 
-    // 2. Versión o Modpack
     if app.create_loader_idx == 3 {
         let label_owned: String;
         let label: &str = if app.create_modpack_resolving {
@@ -93,7 +87,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         );
     }
 
-    // 3. RAM
     draw_input_field(
         f,
         inner[3],
@@ -105,7 +98,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         app.create_ram_input.visual_cursor(),
     );
 
-    // 4. Puerto
     draw_input_field(
         f,
         inner[4],
@@ -117,7 +109,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         app.create_port_input.visual_cursor(),
     );
 
-    // 5. Progreso o Error
     if let Some((ratio, ref msg)) = app.create_progress {
         let gauge = Gauge::default()
             .gauge_style(theme.highlight)
@@ -132,7 +123,6 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         f.render_widget(p, inner[5]);
     }
 
-    // 6. Pie de ayuda según InputMode
     let hints = if app.input_mode == InputMode::Insert {
         Line::from(vec![
             Span::styled(" Esc: ", theme.accent),

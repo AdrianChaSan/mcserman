@@ -3,6 +3,7 @@ use crate::tui::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+/// Renderiza la vista de resumen con el estado, configuración del servidor y detalles del modpack.
 pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let border_style = if app.focus == Focus::MainPanel {
         theme.active_border
@@ -43,7 +44,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ),
         };
 
-        let lines = vec![
+        let loader_display = if let Some(ref lv) = inst.loader_version {
+            format!("{} {}", inst.loader, lv)
+        } else {
+            inst.loader.clone()
+        };
+
+        let mut lines = vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Instancia:    ", theme.muted),
@@ -55,7 +62,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ]),
             Line::from(vec![
                 Span::styled("  Modloader:    ", theme.muted),
-                Span::styled(&inst.loader, theme.accent),
+                Span::styled(loader_display, theme.accent),
                 Span::styled(" (Minecraft ", theme.muted),
                 Span::styled(&inst.mc_version, theme.base),
                 Span::styled(")", theme.muted),
@@ -76,6 +83,36 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 ),
             ]),
         ];
+
+        if let Some(ref mp) = inst.modpack_info {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  ── Información del Modpack ──────────────────────────────", theme.muted),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Nombre modpack: ", theme.muted),
+                Span::styled(&mp.name, theme.bold),
+            ]));
+            if !mp.version.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  Versión actual: ", theme.muted),
+                    Span::styled(&mp.version, theme.accent),
+                ]));
+            }
+            let mut provider_parts = vec![
+                Span::styled("  Proveedor:      ", theme.muted),
+                Span::styled(&mp.provider, theme.base),
+            ];
+            if let Some(ref pid) = mp.project_id {
+                provider_parts.push(Span::styled(" │ Pack ID: ", theme.muted));
+                provider_parts.push(Span::styled(pid, theme.base));
+            }
+            if let Some(ref fid) = mp.file_id {
+                provider_parts.push(Span::styled(" │ Version ID: ", theme.muted));
+                provider_parts.push(Span::styled(fid, theme.base));
+            }
+            lines.push(Line::from(provider_parts));
+        }
 
         let p = Paragraph::new(lines)
             .block(block)

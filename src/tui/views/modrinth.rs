@@ -67,8 +67,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Banner de Advertencia de Serverpack
-                Constraint::Min(0),    // Panel Principal de Mods/Plugins Instalados
+                Constraint::Length(3),
+                Constraint::Min(0),
             ])
             .split(area)
     } else {
@@ -216,7 +216,6 @@ fn draw_installed_mods(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     list_state.select(Some(app.selected_installed_mod));
     f.render_stateful_widget(list, area, &mut *list_state);
 
-    // Scrollbar en el margen derecho sincronizado con la lista
     let visible_height = area.height.saturating_sub(2) as usize;
     if app.installed_mods.len() > visible_height && visible_height > 0 {
         let mut scrollbar_state =
@@ -250,10 +249,10 @@ pub fn draw_add_mod_modal(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Prompt label
-            Constraint::Length(3), // Input box
-            Constraint::Length(1), // Error or status
-            Constraint::Length(1), // Footer hints
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
