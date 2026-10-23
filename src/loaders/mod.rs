@@ -28,6 +28,17 @@ pub async fn download_server_jar(
             let loader_ver = fabric::download_fabric(mc_version, target_path, reporter).await?;
             Ok(Some(loader_ver))
         }
+        LoaderType::NeoForge | LoaderType::Forge => {
+            let client = reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mcserman/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (https://github.com/AdrianChaSan/mcserman)"
+                ))
+                .build()?;
+            serverpack::download_server_starter_jar(&client, target_path, reporter).await?;
+            Ok(None)
+        }
     }
 }
 
@@ -105,6 +116,64 @@ pub async fn fetch_available_versions(loader: &LoaderType) -> Result<Vec<String>
             if !res.status().is_success() {
                 anyhow::bail!(
                     "Error al consultar versiones de Mojang: HTTP {}",
+                    res.status()
+                );
+            }
+            let data: serde_json::Value = res.json().await?;
+            let mut list = Vec::new();
+            if let Some(arr) = data.get("versions").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("release") {
+                        if let Some(v) = item.get("id").and_then(|s| s.as_str()) {
+                            list.push(v.to_string());
+                        }
+                    }
+                }
+            }
+            list
+        }
+        LoaderType::NeoForge => {
+            let res = client
+                .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                anyhow::bail!(
+                    "Error al consultar versiones de Mojang para NeoForge: HTTP {}",
+                    res.status()
+                );
+            }
+            let data: serde_json::Value = res.json().await?;
+            let mut list = Vec::new();
+            if let Some(arr) = data.get("versions").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("release") {
+                        if let Some(v) = item.get("id").and_then(|s| s.as_str()) {
+                            let key = parse_version_key(v);
+                            // NeoForge soporta versiones oficiales de Minecraft 1.20.2 en adelante
+                            if key.len() >= 2
+                                && (key[0] > 1
+                                    || (key[0] == 1 && key[1] > 20)
+                                    || (key[0] == 1
+                                        && key[1] == 20
+                                        && key.get(2).copied().unwrap_or(0) >= 2))
+                            {
+                                list.push(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            list
+        }
+        LoaderType::Forge => {
+            let res = client
+                .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                anyhow::bail!(
+                    "Error al consultar versiones de Mojang para Forge: HTTP {}",
                     res.status()
                 );
             }

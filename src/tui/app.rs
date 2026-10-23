@@ -596,8 +596,17 @@ impl App {
         let name_clone = selected_name.clone();
 
         let task = tokio::spawn(async move {
+            let mut file_opt = None;
+            for _ in 0..20 {
+                if let Ok(f) = tokio::fs::File::open(&log_path).await {
+                    file_opt = Some(f);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+
             // Lectura inicial del archivo: seek al final del archivo si es grande (máx 500 líneas)
-            if let Ok(mut file) = tokio::fs::File::open(&log_path).await {
+            if let Some(mut file) = file_opt {
                 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
                 let file_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
                 const CHUNK_SIZE: u64 = 128 * 1024; // 128 KB

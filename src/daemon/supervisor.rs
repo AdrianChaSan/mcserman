@@ -195,15 +195,22 @@ pub async fn run_daemon(instance_name: &str, paths: &SystemPaths) -> Result<()> 
     let logs_dir = instance_dir.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
     let latest_log_path = logs_dir.join("latest.log");
-    let log_file = tokio::fs::OpenOptions::new()
+    let mut init_file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&latest_log_path)
         .await?;
-    let log_file = Arc::new(Mutex::new(log_file));
+
+    let start_msg = format!(
+        "[mcserman] Iniciando instancia '{}' (Minecraft {} via {})...\n",
+        config.name, config.mc_version, config.loader
+    );
+    let _ = init_file.write_all(start_msg.as_bytes()).await;
+    let _ = init_file.flush().await;
+    let log_file = Arc::new(Mutex::new(init_file));
 
     // 5. Lanzar proceso Java
-    let jvm_args = config.jvm_args();
+    let jvm_args = config.jvm_args(&instance_dir);
     println!(
         "☕ Ejecutando: {} {}",
         java_runtime.display_cmd(),

@@ -10,12 +10,15 @@ use std::path::Path;
 const CURSEFORGE_API_URL: &str = "https://api.curseforge.com/v1/mods/files";
 const DEFAULT_CURSEFORGE_KEY: &str = "$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm";
 
+pub const SERVER_STARTER_JAR_URL: &str =
+    "https://github.com/neoforged/ServerStarterJar/releases/latest/download/server.jar";
+
 #[derive(Debug, Deserialize)]
 struct CfFilesResponse {
     data: Vec<CfFileInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 struct CfFileInfo {
@@ -26,6 +29,18 @@ struct CfFileInfo {
     file_length: Option<u64>,
     game_versions: Option<Vec<String>>,
     is_server_pack: Option<bool>,
+    server_pack_file_id: Option<u64>,
+}
+
+pub async fn download_server_starter_jar(
+    client: &reqwest::Client,
+    target_path: &Path,
+    reporter: &dyn ProgressReporter,
+) -> Result<()> {
+    reporter.on_start("Descargando ServerStarterJar oficial de NeoForge...", 1);
+    download_serverpack_file(client, SERVER_STARTER_JAR_URL, target_path, reporter).await?;
+    reporter.on_finish("ServerStarterJar descargado correctamente");
+    Ok(())
 }
 
 pub fn is_curseforge_or_zip(input: &str) -> bool {
@@ -92,20 +107,11 @@ pub async fn resolve_serverpack(query: &str) -> Result<ResolvedModpack> {
     }
 }
 
-pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
-    let (slug_opt, file_id_opt) = parse_curseforge_url(url);
-    let file_id = file_id_opt.with_context(|| {
-        "No se pudo extraer el ID numérico de archivo de la URL de CurseForge (ej. /files/7522918)"
-    })?;
-
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("mcserman/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    let api_key = std::env::var("CURSEFORGE_API_KEY")
-        .or_else(|_| std::env::var("CF_API_KEY"))
-        .unwrap_or_else(|_| DEFAULT_CURSEFORGE_KEY.to_string());
-
+async fn fetch_cf_file_info(
+    client: &reqwest::Client,
+    api_key: &str,
+    file_id: u64,
+) -> Result<CfFileInfo> {
     let payload = serde_json::json!({
         "fileIds": [file_id]
     });
@@ -114,7 +120,7 @@ pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
         .post(CURSEFORGE_API_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("x-api-key", &api_key)
+        .header("x-api-key", api_key)
         .json(&payload)
         .send()
         .await
@@ -140,7 +146,7 @@ pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
         )
     })?;
 
-    let file_info = parsed
+    parsed
         .data
         .into_iter()
         .find(|f| f.id == file_id)
@@ -149,13 +155,47 @@ pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
                 "CurseForge no devolvió información para el archivo {}",
                 file_id
             )
-        })?;
+        })
+}
+
+pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
+    let (slug_opt, file_id_opt) = parse_curseforge_url(url);
+    let file_id = file_id_opt.with_context(|| {
+        "No se pudo extraer el ID numérico de archivo de la URL de CurseForge (ej. /files/7522918)"
+    })?;
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("mcserman/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let api_key = std::env::var("CURSEFORGE_API_KEY")
+        .or_else(|_| std::env::var("CF_API_KEY"))
+        .unwrap_or_else(|_| DEFAULT_CURSEFORGE_KEY.to_string());
+
+    let mut file_info = fetch_cf_file_info(&client, &api_key, file_id).await?;
+    let mut target_file_id = file_id;
+
+    // Validación estricta y resolución de Server Pack
+    if !file_info.is_server_pack.unwrap_or(false) {
+        if let Some(sp_id) = file_info.server_pack_file_id {
+            let sp_info = fetch_cf_file_info(&client, &api_key, sp_id).await.with_context(|| {
+                format!(
+                    "Error al obtener metadatos del Server Pack vinculado (ID {})",
+                    sp_id
+                )
+            })?;
+            target_file_id = sp_id;
+            file_info = sp_info;
+        } else {
+            bail!("El modpack seleccionado no cuenta con un Server Pack oficial en CurseForge. No se puede crear una instancia de servidor con el archivo de cliente.");
+        }
+    }
 
     let download_url = match file_info.download_url {
         Some(ref u) if !u.is_empty() => u.clone(),
         _ => {
-            let p1 = file_id / 1000;
-            let p2 = file_id % 1000;
+            let p1 = target_file_id / 1000;
+            let p2 = target_file_id % 1000;
             format!(
                 "https://mediafilez.forgecdn.net/files/{}/{}/{}",
                 p1, p2, file_info.file_name
@@ -205,9 +245,9 @@ pub async fn resolve_curseforge_url(url: &str) -> Result<ResolvedModpack> {
 
     Ok(ResolvedModpack {
         pack_type: PackType::ServerPackZip,
-        project_id: file_id.to_string(),
+        project_id: target_file_id.to_string(),
         project_title: file_info.display_name,
-        version_id: file_id.to_string(),
+        version_id: target_file_id.to_string(),
         version_name: file_info.file_name.clone(),
         suggested_instance_name: suggested_name,
         mc_version,
@@ -363,9 +403,20 @@ pub fn extract_serverpack_zip(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if out_path.extension().is_some_and(|ext| ext == "sh") {
-                    let _ =
-                        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
+                let mode = entry.unix_mode().unwrap_or(0);
+                let is_sh = out_path.extension().is_some_and(|ext| ext == "sh");
+                let is_exec = (mode & 0o111) != 0 || is_sh;
+                if mode != 0 {
+                    let final_mode = if is_exec { mode | 0o755 } else { mode };
+                    let _ = std::fs::set_permissions(
+                        &out_path,
+                        std::fs::Permissions::from_mode(final_mode),
+                    );
+                } else if is_exec {
+                    let _ = std::fs::set_permissions(
+                        &out_path,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
                 }
             }
         }
@@ -456,8 +507,15 @@ pub fn detect_server_info(dir: &Path) -> DetectedServerInfo {
         if let Ok(entries) = std::fs::read_dir(&mods_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if loader.is_none() && (name.contains("fabric") || name.contains("Fabric")) {
-                    loader = Some("fabric".to_string());
+                if loader.is_none() {
+                    let name_lower = name.to_lowercase();
+                    if name_lower.contains("neoforge") {
+                        loader = Some("neoforge".to_string());
+                    } else if name_lower.contains("forge") {
+                        loader = Some("forge".to_string());
+                    } else if name_lower.contains("fabric") {
+                        loader = Some("fabric".to_string());
+                    }
                 }
                 if mc_version.is_none() {
                     if let Some(pos) = name.find("-1.") {
@@ -531,6 +589,9 @@ pub async fn install_serverpack(
     let loader_type = match loader_str.to_lowercase().as_str() {
         "fabric" => LoaderType::Fabric,
         "paper" => LoaderType::Paper,
+        "neoforge" => LoaderType::NeoForge,
+        "forge" => LoaderType::Forge,
+        "vanilla" => LoaderType::Vanilla,
         _ => LoaderType::Fabric,
     };
     let loader_version = detected.loader_version.or(resolved.loader_version);
@@ -570,6 +631,19 @@ pub async fn install_serverpack(
                 crate::loaders::vanilla::download_vanilla(&mc_version, &target_path, reporter)
                     .await?;
                 reporter.on_finish("Vanilla Server instalado correctamente");
+                jar_name
+            }
+            LoaderType::NeoForge | LoaderType::Forge => {
+                let jar_name = "server.jar".to_string();
+                let target_path = instance_dir.join(&jar_name);
+                if !target_path.is_file() {
+                    reporter.on_start(
+                        &format!("Descargando ServerStarterJar para {}...", loader_type),
+                        1,
+                    );
+                    download_server_starter_jar(&client, &target_path, reporter).await?;
+                    reporter.on_finish("ServerStarterJar instalado correctamente");
+                }
                 jar_name
             }
         }
@@ -979,6 +1053,10 @@ mod tests {
                 .unwrap();
             zip.write_all(b"dummy jar content").unwrap();
 
+            zip.start_file("MyServerPack/run.sh", options)
+                .unwrap();
+            zip.write_all(b"#!/bin/sh\necho running\n").unwrap();
+
             zip.finish().unwrap();
         }
 
@@ -991,8 +1069,51 @@ mod tests {
         // Debe haber desenvuelto "MyServerPack" directamente en out_dir
         assert!(out_dir.join("server.properties").exists());
         assert!(out_dir.join("mods").join("test-mod-1.20.1.jar").exists());
+        let run_sh = out_dir.join("run.sh");
+        assert!(run_sh.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&run_sh).unwrap().permissions();
+            assert_eq!(perms.mode() & 0o111, 0o111, "run.sh debe tener permisos de ejecución");
+        }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_server_info_neoforge() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mcserman_test_detect_neo_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let var_content = "MINECRAFT_VERSION=1.21.1\nMODLOADER=NeoForge\nMODLOADER_VERSION=21.1.250\nUSE_SSJ=true\n";
+        std::fs::write(temp_dir.join("variables.txt"), var_content).unwrap();
+
+        let info = detect_server_info(&temp_dir);
+        assert_eq!(info.mc_version, Some("1.21.1".to_string()));
+        assert_eq!(info.loader, Some("neoforge".to_string()));
+        assert_eq!(info.loader_version, Some("21.1.250".to_string()));
+        assert_eq!(info.server_jar, None);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access (skipped in NixOS build sandbox)"]
+    async fn test_curseforge_client_auto_resolves_to_serverpack() {
+        let client_url =
+            "https://www.curseforge.com/minecraft/modpacks/better-mc-neoforge-bmc5/files/8835241";
+        let resolved = resolve_serverpack(client_url)
+            .await
+            .expect("Debe resolver automáticamente el Server Pack vinculado");
+
+        assert_eq!(resolved.version_id, "8835262");
+        assert_eq!(resolved.mc_version, "1.21.1");
+        assert_eq!(resolved.loader, "neoforge");
+        assert_eq!(resolved.mrpack_filename, "BMC5Neo_ServerPack_v53.zip");
+        assert!(resolved.mrpack_url.contains("BMC5Neo_ServerPack_v53.zip"));
     }
 
     #[tokio::test]
