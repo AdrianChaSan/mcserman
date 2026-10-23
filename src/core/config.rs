@@ -149,9 +149,58 @@ impl InstanceConfig {
 
         args.push("-jar".to_string());
         args.push(self.server_jar.clone());
+
+        // Si es NeoForge o Forge y aún no existe unix_args.txt (primera ejecución),
+        // ServerStarterJar requiere los flags del instalador para descargarlo e inicializarlo
+        if matches!(self.loader, LoaderType::NeoForge | LoaderType::Forge) {
+            let effective_loader_ver = self
+                .loader_version
+                .clone()
+                .or_else(|| extract_loader_version_from_variables(instance_dir));
+
+            if let Some(ref ver) = effective_loader_ver {
+                args.push("--installer-force".to_string());
+                args.push("--installer".to_string());
+                if self.loader == LoaderType::Forge {
+                    let forge_installer_url = format!(
+                        "https://files.minecraftforge.net/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
+                        self.mc_version, ver, self.mc_version, ver
+                    );
+                    args.push(forge_installer_url);
+                } else if self.mc_version == "1.20.1" {
+                    let neo_1201_url = format!(
+                        "https://maven.neoforged.net/releases/net/neoforged/forge/{}-{}/forge-{}-{}-installer.jar",
+                        self.mc_version, ver, self.mc_version, ver
+                    );
+                    args.push(neo_1201_url);
+                } else {
+                    args.push(ver.clone());
+                }
+            }
+        }
+
         args.push("nogui".to_string());
         args
     }
+}
+
+/// Extrae la versión del modloader desde un archivo `variables.txt` si existe en la instancia.
+pub fn extract_loader_version_from_variables(instance_dir: &Path) -> Option<String> {
+    let var_file = instance_dir.join("variables.txt");
+    if let Ok(content) = std::fs::read_to_string(&var_file) {
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim() == "MODLOADER_VERSION" {
+                    let clean = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !clean.is_empty() {
+                        return Some(clean);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Localiza el archivo `unix_args.txt` generado comúnmente por instaladores de NeoForge y Forge.
@@ -293,6 +342,30 @@ mod tests {
         assert!(!jvm_args.contains(&"-jar".to_string()));
         assert!(jvm_args.iter().any(|a| a
             .starts_with("@libraries/net/neoforged/neoforge/21.1.250/unix_args.txt")));
+        assert!(jvm_args.contains(&"nogui".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_neoforge_installer_args_when_unix_args_absent() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_cfg_installer_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mut cfg = InstanceConfig::new(
+            "neoforge_srv".to_string(),
+            LoaderType::NeoForge,
+            "1.21.1".to_string(),
+        );
+        cfg.loader_version = Some("21.1.250".to_string());
+
+        let jvm_args = cfg.jvm_args(&temp_dir);
+        assert!(jvm_args.contains(&"-jar".to_string()));
+        assert!(jvm_args.contains(&"server.jar".to_string()));
+        assert!(jvm_args.contains(&"--installer-force".to_string()));
+        assert!(jvm_args.contains(&"--installer".to_string()));
+        assert!(jvm_args.contains(&"21.1.250".to_string()));
         assert!(jvm_args.contains(&"nogui".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
