@@ -1,4 +1,4 @@
-use crate::core::config::{InstanceConfig, LoaderType};
+use crate::core::config::{is_legacy_minecraft_version, InstanceConfig, LoaderType};
 use crate::core::paths::SystemPaths;
 use crate::core::progress::ProgressReporter;
 use crate::core::properties::ServerProperties;
@@ -40,6 +40,162 @@ pub async fn download_server_starter_jar(
     reporter.on_start("Descargando ServerStarterJar oficial de NeoForge...", 1);
     download_serverpack_file(client, SERVER_STARTER_JAR_URL, target_path, reporter).await?;
     reporter.on_finish("ServerStarterJar descargado correctamente");
+    Ok(())
+}
+
+/// Consulta la versión recomendada o última de Forge para una versión dada de Minecraft.
+pub async fn fetch_forge_version(client: &reqwest::Client, mc_version: &str) -> Result<String> {
+    let url = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
+    let resp = client
+        .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("mcserman/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .context("Error conectando al repositorio de promociones de Minecraft Forge")?;
+
+    if !resp.status().is_success() {
+        bail!("Error HTTP {} al obtener versiones de Forge", resp.status());
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .context("Error al parsear JSON de promociones de Forge")?;
+    if let Some(promos) = data.get("promos").and_then(|p| p.as_object()) {
+        let rec_key = format!("{}-recommended", mc_version);
+        if let Some(v) = promos.get(&rec_key).and_then(|v| v.as_str()) {
+            return Ok(v.to_string());
+        }
+        let lat_key = format!("{}-latest", mc_version);
+        if let Some(v) = promos.get(&lat_key).and_then(|v| v.as_str()) {
+            return Ok(v.to_string());
+        }
+    }
+    bail!(
+        "No se encontró una versión de Forge compatible con Minecraft {}",
+        mc_version
+    );
+}
+
+/// Descarga e instala Forge para versiones legacy (<= 1.16.5) utilizando el instalador oficial
+/// con la opción `--installServer` y la JVM de Java 8.
+pub async fn install_legacy_forge_server(
+    client: &reqwest::Client,
+    mc_version: &str,
+    forge_version: &str,
+    instance_dir: &Path,
+    target_jar: &Path,
+    reporter: &dyn ProgressReporter,
+) -> Result<()> {
+    let installer_name = "forge-installer.jar";
+    let installer_path = instance_dir.join(installer_name);
+    let forge_installer_url = format!(
+        "https://files.minecraftforge.net/maven/net/minecraftforge/forge/{}-{}/forge-{}-{}-installer.jar",
+        mc_version, forge_version, mc_version, forge_version
+    );
+
+    reporter.on_start(
+        &format!("Descargando instalador de Forge {}...", forge_version),
+        1,
+    );
+    download_serverpack_file(client, &forge_installer_url, &installer_path, reporter).await?;
+    reporter.on_finish("Instalador de Forge descargado");
+
+    let java_ver = crate::core::java::required_java_version(mc_version);
+    let paths = SystemPaths::resolve();
+    let java_runtime = crate::core::java::resolve_java(java_ver, &paths, reporter)
+        .await
+        .with_context(|| {
+            format!(
+                "Se requiere Java {} para ejecutar el instalador de Forge legacy",
+                java_ver
+            )
+        })?;
+
+    reporter.on_start("Instalando servidor Forge (--installServer)...", 1);
+    let mut cmd = java_runtime.build_tokio_command(&[
+        "-jar".to_string(),
+        installer_name.to_string(),
+        "--installServer".to_string(),
+    ]);
+    cmd.current_dir(instance_dir);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .context("Error al iniciar el instalador de Forge")?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let drain_stdout = tokio::spawn(async move {
+        if let Some(mut out) = stdout {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+        }
+    });
+    let drain_stderr = tokio::spawn(async move {
+        let mut err_msg = String::new();
+        if let Some(mut err) = stderr {
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut err_msg).await;
+        }
+        err_msg
+    });
+
+    let status = child
+        .wait()
+        .await
+        .context("Error durante la ejecución del instalador de Forge")?;
+    let _ = drain_stdout.await;
+    let err_msg = drain_stderr.await.unwrap_or_default();
+
+    if !status.success() {
+        bail!(
+            "El instalador de Forge falló con código {:?}. {}",
+            status.code(),
+            err_msg.trim()
+        );
+    }
+    reporter.on_finish("Instalación de Forge finalizada");
+
+    // Localizar el jar de Forge generado (forge-*.jar que no sea installer)
+    let mut found_forge_jar = None;
+    if let Ok(entries) = std::fs::read_dir(instance_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("forge-")
+                        && name.ends_with(".jar")
+                        && !name.contains("installer")
+                    {
+                        found_forge_jar = Some(p);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(src_jar) = found_forge_jar {
+        if src_jar != target_jar {
+            let _ = std::fs::rename(&src_jar, target_jar).or_else(|_| {
+                std::fs::copy(&src_jar, target_jar)?;
+                let _ = std::fs::remove_file(&src_jar);
+                Ok::<(), std::io::Error>(())
+            });
+        }
+    } else if !target_jar.exists() {
+        bail!("El instalador de Forge terminó pero no se generó el archivo jar del servidor.");
+    }
+
+    let _ = std::fs::remove_file(&installer_path);
+    let _ = std::fs::remove_file(instance_dir.join("forge-installer.jar.log"));
+
     Ok(())
 }
 
@@ -441,27 +597,85 @@ pub fn detect_server_info(dir: &Path) -> DetectedServerInfo {
     let mut loader = None;
     let mut loader_version = None;
 
-    // 1. Detectar ejecutables comunes en la raíz
-    let common_jar_names = [
-        "fabric-server-launch.jar",
-        "fabric-server.jar",
-        "server.jar",
-        "run.jar",
-    ];
-    for name in &common_jar_names {
-        if dir.join(name).is_file() {
-            server_jar = Some(name.to_string());
-            break;
+    // 1. Detectar ejecutables en la raíz
+    // Prioridad 1: forge.jar o forge-*.jar (que no sea installer)
+    if dir.join("forge.jar").is_file() {
+        server_jar = Some("forge.jar".to_string());
+        loader = loader.or_else(|| Some("forge".to_string()));
+    } else if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with("forge-")
+                        && file_name.ends_with(".jar")
+                        && !file_name.contains("installer")
+                    {
+                        server_jar = Some(file_name.to_string());
+                        loader = loader.or_else(|| Some("forge".to_string()));
+
+                        let name_clean = file_name
+                            .strip_prefix("forge-")
+                            .unwrap_or(file_name)
+                            .strip_suffix("-universal.jar")
+                            .unwrap_or_else(|| {
+                                file_name
+                                    .strip_prefix("forge-")
+                                    .unwrap_or(file_name)
+                                    .strip_suffix(".jar")
+                                    .unwrap_or(file_name)
+                            });
+                        let parts: Vec<&str> = name_clean.split('-').collect();
+                        if parts.len() >= 2 {
+                            if parts[0].starts_with("1.") {
+                                mc_version = mc_version.or_else(|| Some(parts[0].to_string()));
+                            }
+                            loader_version = loader_version.or_else(|| Some(parts[1].to_string()));
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
+
+    // Prioridad 2: Fabric o Paper específicos
+    if server_jar.is_none() {
+        let specific_jars = [
+            ("fabric-server-launch.jar", "fabric"),
+            ("fabric-server.jar", "fabric"),
+        ];
+        for (name, l) in specific_jars {
+            if dir.join(name).is_file() {
+                server_jar = Some(name.to_string());
+                loader = loader.or_else(|| Some(l.to_string()));
+                break;
+            }
+        }
+    }
+
+    // Prioridad 3: server.jar o run.jar
+    if server_jar.is_none() {
+        let generic_jars = ["server.jar", "run.jar"];
+        for name in &generic_jars {
+            if dir.join(name).is_file() {
+                server_jar = Some(name.to_string());
+                break;
+            }
+        }
+    }
+
+    // Prioridad 4: Otros jars que contengan "server", pero EXCLUYENDO "minecraft_server"
     if server_jar.is_none() {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_file() {
                     if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
-                        if file_name.ends_with(".jar")
-                            && file_name.to_lowercase().contains("server")
+                        let lower = file_name.to_lowercase();
+                        if lower.ends_with(".jar")
+                            && lower.contains("server")
+                            && !lower.starts_with("minecraft_server")
                         {
                             server_jar = Some(file_name.to_string());
                             break;
@@ -634,17 +848,39 @@ pub async fn install_serverpack(
                 jar_name
             }
             LoaderType::NeoForge | LoaderType::Forge => {
-                let jar_name = "server.jar".to_string();
-                let target_path = instance_dir.join(&jar_name);
-                if !target_path.is_file() {
-                    reporter.on_start(
-                        &format!("Descargando ServerStarterJar para {}...", loader_type),
-                        1,
-                    );
-                    download_server_starter_jar(&client, &target_path, reporter).await?;
-                    reporter.on_finish("ServerStarterJar instalado correctamente");
+                if is_legacy_minecraft_version(&mc_version) {
+                    let target_jar_name = "forge.jar".to_string();
+                    let target_path = instance_dir.join(&target_jar_name);
+                    if !target_path.is_file() {
+                        let forge_ver = if let Some(ref ver) = loader_version {
+                            ver.clone()
+                        } else {
+                            fetch_forge_version(&client, &mc_version).await?
+                        };
+                        install_legacy_forge_server(
+                            &client,
+                            &mc_version,
+                            &forge_ver,
+                            &instance_dir,
+                            &target_path,
+                            reporter,
+                        )
+                        .await?;
+                    }
+                    target_jar_name
+                } else {
+                    let jar_name = "server.jar".to_string();
+                    let target_path = instance_dir.join(&jar_name);
+                    if !target_path.is_file() {
+                        reporter.on_start(
+                            &format!("Descargando ServerStarterJar para {}...", loader_type),
+                            1,
+                        );
+                        download_server_starter_jar(&client, &target_path, reporter).await?;
+                        reporter.on_finish("ServerStarterJar instalado correctamente");
+                    }
+                    jar_name
                 }
-                jar_name
             }
         }
     };
@@ -1207,6 +1443,57 @@ mod tests {
 
         // Limpieza
         let _ = std::fs::remove_dir_all(&inst_dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_server_info_legacy_forge_preinstalled() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_test_detect_forge_legacy_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Crear tanto forge-*.jar como minecraft_server.*.jar
+        std::fs::write(
+            temp_dir.join("minecraft_server.1.12.2.jar"),
+            b"dummy vanilla",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.join("forge-1.12.2-14.23.5.2860.jar"),
+            b"dummy forge",
+        )
+        .unwrap();
+
+        let info = detect_server_info(&temp_dir);
+        // Debe priorizar forge-*.jar sobre minecraft_server.*.jar
+        assert_eq!(
+            info.server_jar,
+            Some("forge-1.12.2-14.23.5.2860.jar".to_string())
+        );
+        assert_eq!(info.loader, Some("forge".to_string()));
+        assert_eq!(info.mc_version, Some("1.12.2".to_string()));
+        assert_eq!(info.loader_version, Some("14.23.5.2860".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_server_info_legacy_forge_forge_dot_jar() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_test_detect_forge_dot_jar_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        std::fs::write(
+            temp_dir.join("minecraft_server.1.12.2.jar"),
+            b"dummy vanilla",
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("forge.jar"), b"dummy forge").unwrap();
+
+        let info = detect_server_info(&temp_dir);
+        assert_eq!(info.server_jar, Some("forge.jar".to_string()));
+        assert_eq!(info.loader, Some("forge".to_string()));
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

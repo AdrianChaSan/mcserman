@@ -81,7 +81,13 @@ impl InstanceConfig {
             LoaderType::Vanilla => "server.jar".to_string(),
             LoaderType::Paper => format!("paper-{}.jar", mc_version),
             LoaderType::Fabric => format!("fabric-server-{}.jar", mc_version),
-            LoaderType::NeoForge | LoaderType::Forge => "server.jar".to_string(),
+            LoaderType::NeoForge | LoaderType::Forge => {
+                if is_legacy_minecraft_version(&mc_version) {
+                    "forge.jar".to_string()
+                } else {
+                    "server.jar".to_string()
+                }
+            }
         };
 
         Self {
@@ -151,8 +157,13 @@ impl InstanceConfig {
         args.push(self.server_jar.clone());
 
         // Si es NeoForge o Forge y aún no existe unix_args.txt (primera ejecución),
-        // ServerStarterJar requiere los flags del instalador para descargarlo e inicializarlo
-        if matches!(self.loader, LoaderType::NeoForge | LoaderType::Forge) {
+        // ServerStarterJar requiere los flags del instalador para descargarlo e inicializarlo.
+        // Solo para Minecraft moderno (>= 1.17). En Minecraft <= 1.16.5 se usa directamente
+        // el ejecutable de Forge (forge.jar) sin ServerStarterJar para no romper Java 8.
+        if matches!(self.loader, LoaderType::NeoForge | LoaderType::Forge)
+            && self.server_jar == "server.jar"
+            && !is_legacy_minecraft_version(&self.mc_version)
+        {
             let effective_loader_ver = self
                 .loader_version
                 .clone()
@@ -201,6 +212,21 @@ pub fn extract_loader_version_from_variables(instance_dir: &Path) -> Option<Stri
         }
     }
     None
+}
+
+/// Comprueba si una versión de Minecraft es legacy (<= 1.16.5).
+///
+/// Las versiones legacy utilizan Java 8 y en modloaders como Forge ejecutan
+/// directamente el jar del servidor (forge.jar) en lugar del sistema modular
+/// de argumentos (unix_args.txt) o ServerStarterJar (que requiere Java 16+).
+pub fn is_legacy_minecraft_version(mc_version: &str) -> bool {
+    let parts: Vec<&str> = mc_version.split('.').collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let major: u32 = parts[0].parse().unwrap_or(1);
+    let minor: u32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(20);
+    major == 1 && minor <= 16
 }
 
 /// Localiza el archivo `unix_args.txt` generado comúnmente por instaladores de NeoForge y Forge.
@@ -366,6 +392,47 @@ mod tests {
         assert!(jvm_args.contains(&"--installer-force".to_string()));
         assert!(jvm_args.contains(&"--installer".to_string()));
         assert!(jvm_args.contains(&"21.1.250".to_string()));
+        assert!(jvm_args.contains(&"nogui".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_legacy_minecraft_version() {
+        assert!(is_legacy_minecraft_version("1.7.10"));
+        assert!(is_legacy_minecraft_version("1.12.2"));
+        assert!(is_legacy_minecraft_version("1.16"));
+        assert!(is_legacy_minecraft_version("1.16.5"));
+
+        assert!(!is_legacy_minecraft_version("1.17"));
+        assert!(!is_legacy_minecraft_version("1.17.1"));
+        assert!(!is_legacy_minecraft_version("1.18.2"));
+        assert!(!is_legacy_minecraft_version("1.20.1"));
+        assert!(!is_legacy_minecraft_version("1.21.1"));
+        assert!(!is_legacy_minecraft_version("26.1"));
+    }
+
+    #[test]
+    fn test_legacy_forge_instance_config() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_cfg_legacy_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let cfg = InstanceConfig::new(
+            "rlcraft_srv".to_string(),
+            LoaderType::Forge,
+            "1.12.2".to_string(),
+        );
+
+        assert_eq!(cfg.server_jar, "forge.jar");
+        assert_eq!(cfg.java_version, 8);
+
+        let jvm_args = cfg.jvm_args(&temp_dir);
+        assert!(jvm_args.contains(&"-jar".to_string()));
+        assert!(jvm_args.contains(&"forge.jar".to_string()));
+        // En legacy Forge no debe agregarse --installer-force ni ServerStarterJar
+        assert!(!jvm_args.contains(&"--installer-force".to_string()));
+        assert!(!jvm_args.contains(&"--installer".to_string()));
         assert!(jvm_args.contains(&"nogui".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);

@@ -36,8 +36,23 @@ pub async fn download_server_jar(
                     " (https://github.com/AdrianChaSan/mcserman)"
                 ))
                 .build()?;
-            serverpack::download_server_starter_jar(&client, target_path, reporter).await?;
-            Ok(None)
+            if crate::core::config::is_legacy_minecraft_version(mc_version) {
+                let forge_ver = serverpack::fetch_forge_version(&client, mc_version).await?;
+                let instance_dir = target_path.parent().unwrap_or_else(|| Path::new("."));
+                serverpack::install_legacy_forge_server(
+                    &client,
+                    mc_version,
+                    &forge_ver,
+                    instance_dir,
+                    target_path,
+                    reporter,
+                )
+                .await?;
+                Ok(Some(forge_ver))
+            } else {
+                serverpack::download_server_starter_jar(&client, target_path, reporter).await?;
+                Ok(None)
+            }
         }
     }
 }
