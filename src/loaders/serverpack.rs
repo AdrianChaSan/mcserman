@@ -591,6 +591,59 @@ pub struct DetectedServerInfo {
     pub loader_version: Option<String>,
 }
 
+/// Intenta extraer la versión de Forge a partir de textos, readmes o scripts presentes en el Server Pack.
+pub fn extract_forge_version_from_text(content: &str, mc_ver: Option<&str>) -> Option<String> {
+    // 1. Buscar forge-<mc_version>-<forge_version> o forge/<mc_version>-<forge_version>
+    if let Some(mc) = mc_ver {
+        for prefix in [format!("forge-{}-", mc), format!("forge/{}-", mc)] {
+            if let Some(pos) = content.find(&prefix) {
+                let rest = &content[pos + prefix.len()..];
+                let ver: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if ver.split('.').count() >= 3 {
+                    return Some(ver);
+                }
+            }
+        }
+    }
+
+    // 2. Buscar "id": "forge-<version>" (formato manifest.json de CurseForge)
+    if let Some(pos) = content.find("\"forge-") {
+        let rest = &content[pos + 7..];
+        let ver: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if ver.split('.').count() >= 3 {
+            return Some(ver);
+        }
+    }
+
+    // 3. Buscar patrones forge-<major>.<minor>.<patch>.<build>
+    for word in content.split_whitespace() {
+        if let Some(pos) = word.find("forge-") {
+            let candidate = &word[pos + 6..];
+            let clean = candidate
+                .trim_end_matches(".jar")
+                .trim_end_matches("-installer.jar")
+                .trim_matches('"')
+                .trim_matches('\'');
+            let parts: Vec<&str> = clean.split('-').collect();
+            for part in parts {
+                if part.split('.').count() == 4
+                    && part.chars().all(|c| c.is_ascii_digit() || c == '.')
+                {
+                    return Some(part.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 pub fn detect_server_info(dir: &Path) -> DetectedServerInfo {
     let mut server_jar = None;
     let mut mc_version = None;
@@ -715,9 +768,42 @@ pub fn detect_server_info(dir: &Path) -> DetectedServerInfo {
         }
     }
 
-    // 3. Inspeccionar mods/ para corroborar loader y versión de MC
+    // 2.1 Escanear readmes, scripts y manifiestos en la raíz para detectar versión de Forge
+    if loader_version.is_none() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let name_lower = name.to_lowercase();
+                    if ext == "txt"
+                        || ext == "bat"
+                        || ext == "sh"
+                        || ext == "json"
+                        || name_lower.contains("readme")
+                    {
+                        if let Ok(content) = std::fs::read_to_string(&p) {
+                            if let Some(ver) =
+                                extract_forge_version_from_text(&content, mc_version.as_deref())
+                            {
+                                loader_version = Some(ver);
+                                loader = loader.or_else(|| Some("forge".to_string()));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Inspeccionar mods/ para corroborar loader y versión de MC (por consenso/frecuencia)
     let mods_dir = dir.join("mods");
     if mods_dir.is_dir() {
+        let mut mc_version_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
         if let Ok(entries) = std::fs::read_dir(&mods_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -732,14 +818,67 @@ pub fn detect_server_info(dir: &Path) -> DetectedServerInfo {
                     }
                 }
                 if mc_version.is_none() {
-                    if let Some(pos) = name.find("-1.") {
-                        let sub = &name[pos + 1..];
-                        let ver_str: String = sub
-                            .chars()
-                            .take_while(|c| c.is_ascii_digit() || *c == '.')
-                            .collect();
-                        if ver_str.split('.').count() >= 2 {
-                            mc_version = Some(ver_str);
+                    // Extraer candidatos válidos de versión de MC (ej. 1.12.2, 1.16.5, 1.20.1)
+                    for part in name.split(|c: char| !c.is_alphanumeric() && c != '.') {
+                        let candidate = part.trim_start_matches(|c: char| c.is_alphabetic());
+                        if candidate.starts_with("1.") {
+                            let segs: Vec<&str> = candidate.split('.').collect();
+                            if segs.len() >= 2 && segs.len() <= 3 {
+                                if let (Ok(1), Ok(minor)) =
+                                    (segs[0].parse::<u32>(), segs[1].parse::<u32>())
+                                {
+                                    if (7..=30).contains(&minor) {
+                                        let valid_patch = if segs.len() == 3 {
+                                            segs[2].parse::<u32>().is_ok()
+                                        } else {
+                                            true
+                                        };
+                                        if valid_patch {
+                                            *mc_version_counts
+                                                .entry(candidate.to_string())
+                                                .or_insert(0) += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if mc_version.is_none() {
+            if let Some((best_ver, _)) =
+                mc_version_counts.into_iter().max_by_key(|(_, count)| *count)
+            {
+                mc_version = Some(best_ver);
+            }
+        }
+    }
+
+    // 4. Si aún no se detectó loader_version pero ahora conocemos mc_version, re-escanear
+    if loader_version.is_none() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let name_lower = name.to_lowercase();
+                    if ext == "txt"
+                        || ext == "bat"
+                        || ext == "sh"
+                        || ext == "json"
+                        || name_lower.contains("readme")
+                    {
+                        if let Ok(content) = std::fs::read_to_string(&p) {
+                            if let Some(ver) =
+                                extract_forge_version_from_text(&content, mc_version.as_deref())
+                            {
+                                loader_version = Some(ver);
+                                loader = loader.or_else(|| Some("forge".to_string()));
+                                break;
+                            }
                         }
                     }
                 }
@@ -798,8 +937,18 @@ pub async fn install_serverpack(
     // 3. Inspeccionar metadatos tras la extracción
     let detected = detect_server_info(&instance_dir);
 
-    let mc_version = detected.mc_version.unwrap_or(resolved.mc_version);
-    let loader_str = detected.loader.unwrap_or(resolved.loader);
+    // Si resolved.mc_version proviene de una API oficial (CurseForge / Modrinth),
+    // es la fuente de verdad definitiva y NUNCA debe ser sobreescrita por detección heurística en mods/
+    let mc_version = if resolved.version_id != "custom" && !resolved.mc_version.is_empty() {
+        resolved.mc_version
+    } else {
+        detected.mc_version.unwrap_or(resolved.mc_version)
+    };
+    let loader_str = if resolved.version_id != "custom" && !resolved.loader.is_empty() {
+        resolved.loader
+    } else {
+        detected.loader.unwrap_or(resolved.loader)
+    };
     let loader_type = match loader_str.to_lowercase().as_str() {
         "fabric" => LoaderType::Fabric,
         "paper" => LoaderType::Paper,
@@ -1492,6 +1641,68 @@ mod tests {
 
         let info = detect_server_info(&temp_dir);
         assert_eq!(info.server_jar, Some("forge.jar".to_string()));
+        assert_eq!(info.loader, Some("forge".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_extract_forge_version_from_readme() {
+        let text = r#"
+        Quick Windows Server Install Guide
+        2. Download the Forge 2860 server installer: https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860-installer.jar
+        java -server -Xmx6G -jar forge-1.12.2-14.23.5.2860.jar nogui
+        "#;
+        let ver = extract_forge_version_from_text(text, Some("1.12.2"));
+        assert_eq!(ver, Some("14.23.5.2860".to_string()));
+
+        let manifest = r#"{"minecraft":{"version":"1.12.2","modLoaders":[{"id":"forge-14.23.5.2860","primary":true}]}}"#;
+        let ver_m = extract_forge_version_from_text(manifest, Some("1.12.2"));
+        assert_eq!(ver_m, Some("14.23.5.2860".to_string()));
+    }
+
+    #[test]
+    fn test_detect_server_info_anomalous_mods_frequency() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_test_anomalous_mods_{}", std::process::id()));
+        let mods_dir = temp_dir.join("mods");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+
+        // 1 mod con 1.9.1 que alfabéticamente va primero por el guion '-'
+        std::fs::write(
+            mods_dir.join("-mod-director-launchwrapper-1.9.1.jar"),
+            b"dummy",
+        )
+        .unwrap();
+        // Varios mods con 1.12.2
+        std::fs::write(mods_dir.join("ToolBelt-1.12.2-1.9.14.jar"), b"dummy").unwrap();
+        std::fs::write(mods_dir.join("jei_1.12.2-4.16.1.302.jar"), b"dummy").unwrap();
+        std::fs::write(mods_dir.join("appleskin-mc1.12.2-1.0.14.jar"), b"dummy").unwrap();
+
+        let info = detect_server_info(&temp_dir);
+        // Debe ganar 1.12.2 por consenso de frecuencia y no 1.9.1
+        assert_eq!(info.mc_version, Some("1.12.2".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_server_info_with_readme_version() {
+        let temp_dir = std::env::temp_dir()
+            .join(format!("mcserman_test_readme_forge_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let readme_content = r#"
+        Download Forge 2860: https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860-installer.jar
+        "#;
+        std::fs::write(
+            temp_dir.join("SERVER README OR DIE.txt"),
+            readme_content,
+        )
+        .unwrap();
+
+        let info = detect_server_info(&temp_dir);
+        assert_eq!(info.loader_version, Some("14.23.5.2860".to_string()));
         assert_eq!(info.loader, Some("forge".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
